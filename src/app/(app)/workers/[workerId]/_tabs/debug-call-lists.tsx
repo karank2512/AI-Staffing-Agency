@@ -3,7 +3,6 @@ import { ChevronRight } from "lucide-react";
 import { JsonView } from "@/components/json-view";
 import { SimulatedBadge } from "@/components/simulated-badge";
 import { formatDateTime, formatDuration, formatTokens, formatUsdPrecise } from "@/lib/format";
-import { TONE_CLASSES } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { DebugModelCall, DebugToolCall } from "@/server/queries/worker-manage";
 
@@ -12,23 +11,19 @@ import type { DebugModelCall, DebugToolCall } from "@/server/queries/worker-mana
  * request/response or input/output as collapsible JSON underneath.
  */
 
-const TOOL_STATUS_TONE: Record<DebugToolCall["status"], keyof typeof TONE_CLASSES> = {
-  RUNNING: "running",
-  SUCCEEDED: "success",
-  FAILED: "failure",
-  DENIED: "failure",
-  PENDING_APPROVAL: "attention",
-  APPROVED: "success",
-};
+const SUMMARY =
+  "flex cursor-pointer list-none items-center gap-3 px-5 py-3 transition-colors duration-200 hover:bg-muted sm:px-6 [&::-webkit-details-marker]:hidden";
 
-function Cell({ children, className, mono = false }: { children: React.ReactNode; className?: string; mono?: boolean }) {
-  return <span className={cn("truncate text-xs text-muted-foreground", mono && "font-mono text-[11px]", className)}>{children}</span>;
+const ROW = "relative [&:not(:first-child)]:before:absolute [&:not(:first-child)]:before:inset-x-5 [&:not(:first-child)]:before:top-0 [&:not(:first-child)]:before:h-px [&:not(:first-child)]:before:bg-border sm:[&:not(:first-child)]:before:inset-x-6";
+
+function Meta({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <span className={cn("text-footnote truncate text-muted-foreground", className)}>{children}</span>;
 }
 
 function RunLink({ runId }: { runId: string | null }) {
-  if (!runId) return <Cell mono>no run</Cell>;
+  if (!runId) return <Meta className="font-mono">no run</Meta>;
   return (
-    <Link href={`/runs/${runId}`} className="truncate font-mono text-[11px] text-primary underline-offset-4 hover:underline">
+    <Link href={`/runs/${runId}`} className="text-footnote truncate font-mono text-link hover:underline">
       run {runId.slice(-8)}
     </Link>
   );
@@ -36,35 +31,39 @@ function RunLink({ runId }: { runId: string | null }) {
 
 export function DebugModelCallList({ calls }: { calls: DebugModelCall[] }) {
   return (
-    <ul className="divide-y">
+    <ul role="list" className="flex flex-col">
       {calls.map((c) => (
-        <li key={c.id}>
+        <li key={c.id} className={ROW}>
           <details className="group/call">
-            <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-2.5 hover:bg-muted/40 [&::-webkit-details-marker]:hidden">
-              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/call:rotate-90" aria-hidden="true" />
-              <div className="grid min-w-0 flex-1 grid-cols-2 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1.6fr)_repeat(4,minmax(0,0.8fr))]">
-                <span className="truncate text-sm font-medium">{c.purpose}</span>
-                <Cell mono>
-                  {c.provider}:{c.model} <span className="text-muted-foreground/60">· {c.tier}</span>
-                </Cell>
-                <Cell className="tabular-nums">
+            <summary className={SUMMARY}>
+              <ChevronRight
+                className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open/call:rotate-90"
+                aria-hidden="true"
+              />
+              <div className="grid min-w-0 flex-1 grid-cols-2 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1.6fr)_repeat(3,minmax(0,0.9fr))]">
+                <span className="truncate text-callout font-medium">{c.purpose}</span>
+                <Meta className="font-mono">
+                  {c.provider}:{c.model} · {c.tier}
+                </Meta>
+                <Meta className="metric">
                   {formatTokens(c.inputTokens)} in · {formatTokens(c.outputTokens)} out
-                </Cell>
-                <Cell className="tabular-nums">{formatUsdPrecise(c.costUsd)}</Cell>
-                <Cell className="tabular-nums">{formatDuration(c.latencyMs)}</Cell>
+                </Meta>
+                <Meta className="metric">
+                  {formatUsdPrecise(c.costUsd)} · {formatDuration(c.latencyMs)}
+                </Meta>
                 <span className="flex items-center gap-2">
-                  {c.simulated ? <SimulatedBadge className="h-4.5 px-1.5 text-[10px]" /> : null}
-                  {c.error ? <span className={cn("truncate text-[11px] font-medium", TONE_CLASSES.failure.text)}>error</span> : null}
+                  {c.simulated ? <SimulatedBadge /> : null}
+                  {c.error ? <span className="text-footnote truncate text-danger">error</span> : null}
                 </span>
               </div>
             </summary>
-            <div className="space-y-2 border-t bg-muted/20 px-4 py-3 pl-11">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+            <div className="space-y-3 bg-muted px-5 py-4 sm:px-6">
+              <p className="text-footnote flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
                 <span className="font-mono">{c.id}</span>
                 <RunLink runId={c.runId} />
                 <span>{formatDateTime(c.createdAt)}</span>
-                {c.error ? <span className={TONE_CLASSES.failure.text}>{c.error}</span> : null}
-              </div>
+                {c.error ? <span className="text-danger">{c.error}</span> : null}
+              </p>
               <JsonView label="Request" value={c.request} />
               <JsonView label="Response" value={c.response} />
             </div>
@@ -77,32 +76,36 @@ export function DebugModelCallList({ calls }: { calls: DebugModelCall[] }) {
 
 export function DebugToolCallList({ calls }: { calls: DebugToolCall[] }) {
   return (
-    <ul className="divide-y">
+    <ul role="list" className="flex flex-col">
       {calls.map((t) => (
-        <li key={t.id}>
+        <li key={t.id} className={ROW}>
           <details className="group/call">
-            <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-2.5 hover:bg-muted/40 [&::-webkit-details-marker]:hidden">
-              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/call:rotate-90" aria-hidden="true" />
-              <div className="grid min-w-0 flex-1 grid-cols-2 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_repeat(3,minmax(0,0.8fr))_minmax(0,1fr)]">
-                <span className="truncate font-mono text-sm font-medium">{t.toolName}</span>
-                <span className={cn("inline-flex h-5 w-fit items-center rounded-full border px-2 text-[11px] font-medium", TONE_CLASSES[TOOL_STATUS_TONE[t.status]].badge)}>
+            <summary className={SUMMARY}>
+              <ChevronRight
+                className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-open/call:rotate-90"
+                aria-hidden="true"
+              />
+              <div className="grid min-w-0 flex-1 grid-cols-2 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_repeat(2,minmax(0,0.9fr))_minmax(0,1fr)]">
+                <span className="truncate font-mono text-callout font-medium">{t.toolName}</span>
+                <Meta className={cn(t.status === "FAILED" || t.status === "DENIED" ? "text-danger" : undefined)}>
                   {t.status.toLowerCase().replace(/_/g, " ")}
-                </span>
-                <Cell className="tabular-nums">attempt {t.attempt}</Cell>
-                <Cell className="tabular-nums">{formatUsdPrecise(t.costUsd)}</Cell>
-                <Cell className="tabular-nums">{t.latencyMs === null ? "—" : formatDuration(t.latencyMs)}</Cell>
+                </Meta>
+                <Meta className="metric">attempt {t.attempt}</Meta>
+                <Meta className="metric">
+                  {formatUsdPrecise(t.costUsd)} · {t.latencyMs === null ? "—" : formatDuration(t.latencyMs)}
+                </Meta>
                 <span className="flex items-center gap-2">
-                  {t.simulated ? <SimulatedBadge className="h-4.5 px-1.5 text-[10px]" /> : null}
+                  {t.simulated ? <SimulatedBadge /> : null}
                   <RunLink runId={t.runId} />
                 </span>
               </div>
             </summary>
-            <div className="space-y-2 border-t bg-muted/20 px-4 py-3 pl-11">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+            <div className="space-y-3 bg-muted px-5 py-4 sm:px-6">
+              <p className="text-footnote flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
                 <span className="font-mono">{t.id}</span>
                 <span>{formatDateTime(t.createdAt)}</span>
-                {t.error ? <span className={TONE_CLASSES.failure.text}>{t.error}</span> : null}
-              </div>
+                {t.error ? <span className="text-danger">{t.error}</span> : null}
+              </p>
               <JsonView label="Input" value={t.input} />
               <JsonView label="Output" value={t.output} />
             </div>

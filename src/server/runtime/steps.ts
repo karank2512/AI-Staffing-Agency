@@ -1,5 +1,6 @@
 import { Prisma, type RunStepKind, type RunStepStatus } from "@prisma/client";
 import { db, toJson, type DbOrTx } from "@/server/db";
+import { redactSecrets } from "@/server/security";
 import { clipText, compact, oneLine } from "./compact";
 import { LockLost } from "./failure";
 
@@ -88,7 +89,9 @@ export class StepWriter {
       finishedAt: now,
       durationMs: args.durationMs !== undefined ? (args.durationMs === null ? null : Math.max(0, Math.round(args.durationMs))) : Math.max(0, now.getTime() - step.startedAt.getTime()),
       ...(args.output === undefined ? {} : { output: toJson(compact(args.output)) }),
-      ...(args.error === undefined ? {} : { error: clipText(args.error, 2_000) }),
+      // Every step error is read by the org in the run timeline, so nothing that looks like a credential
+      // survives into the trace (audit F-009) — the raw text stays in the server log.
+      ...(args.error === undefined ? {} : { error: clipText(redactSecrets(args.error), 2_000) }),
       ...(args.detail === undefined ? {} : { detail: args.detail }),
       ...(args.title === undefined ? {} : { title: oneLine(args.title) }),
     };

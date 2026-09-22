@@ -1,226 +1,173 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { ArrowRight, CalendarClock, CalendarDays, GitCommitHorizontal, Radio, ShieldAlert, Sparkles, type LucideIcon } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { RelativeTime } from "@/components/relative-time";
-import { ScoreRing } from "@/components/score-ring";
-import { SimulatedBadge } from "@/components/simulated-badge";
+import { ScoreMetric } from "@/components/score-ring";
 import { StatusBadge } from "@/components/status-badge";
-import { Button } from "@/components/ui/button";
 import { WorkerAvatar } from "@/components/worker-avatar";
 import { formatDate, formatDateTime } from "@/lib/format";
-import { SCORE_BAND_CLASSES, scoreBand, statusLabel } from "@/lib/status";
-import type { WorkerHeaderView } from "@/server/queries/worker-profile";
 import { cn } from "@/lib/utils";
+import type { WorkerHeaderView } from "@/server/queries/worker-profile";
 import { WorkerActions } from "./worker-actions";
 
-/** Big avatar, name, badges, score and the facts a manager glances at before opening a tab. */
-export function WorkerHeader({ worker }: { worker: WorkerHeaderView }) {
-  const band = SCORE_BAND_CLASSES[scoreBand(worker.score)];
+/**
+ * The profile header: one dominant name, one status, a calm score and a single primary action. Everything else
+ * (facts, callouts) is demoted to a quiet 13px line so the eye lands on the person, not on chrome.
+ */
+export function WorkerHeader({
+  worker,
+  floatingMobileActions = true,
+}: {
+  worker: WorkerHeaderView;
+  /** The chat tab owns the bottom of a phone screen, so its actions stay in the header instead. */
+  floatingMobileActions?: boolean;
+}) {
   const inFlight = worker.inFlightRun;
+  const waiting = inFlight?.status === "WAITING_FOR_APPROVAL";
 
   return (
     <>
       <PageHeader
-        breadcrumbs={[{ label: "Workforce", href: "/workforce" }, { label: worker.name }]}
+        className="mb-5"
+        backHref="/workforce"
+        backLabel="Workforce"
         title={
-          <span className="flex items-center gap-3">
-            <WorkerAvatar name={worker.name} color={worker.avatarColor} size="lg" />
-            <span className="flex flex-col gap-1">
-              <span className="flex flex-wrap items-center gap-2">
-                {worker.name}
-                <StatusBadge kind="worker" status={worker.status} />
-                {/* The reason is one sentence from the evaluation module — surfaced as a tooltip here and in full in the banner below. */}
-                <span title={worker.healthReason ?? undefined} className="inline-flex">
-                  <StatusBadge kind="health" status={worker.health} />
-                </span>
-                {worker.simulated ? <SimulatedBadge /> : null}
-              </span>
-              <span className="text-sm font-normal text-muted-foreground">{worker.title}</span>
-            </span>
+          <span className="flex min-w-0 items-center gap-4 sm:gap-5">
+            <WorkerAvatar name={worker.name} color={worker.avatarColor} size="xl" className="max-sm:size-14" />
+            <span className="text-headline min-w-0 truncate">{worker.name}</span>
           </span>
         }
         description={
-          // One line each: a long job title or persona bio must not stack into a tall block beside the actions.
           <>
-            <span className="block truncate" title={`Hired for ${worker.job.title}`}>
-              Hired for{" "}
-              <Link href={`/jobs/${worker.job.id}`} className="font-medium text-foreground underline-offset-4 hover:underline">
-                {worker.job.title}
-              </Link>
-            </span>
-            {worker.summary ? (
-              <span className="mt-0.5 line-clamp-1" title={worker.summary}>
-                {worker.summary}
-              </span>
-            ) : null}
+            <span className="block truncate">{worker.title}</span>
+            <Link
+              href={`/jobs/${worker.job.id}`}
+              className="mt-1 block w-fit max-w-full truncate text-[15px] text-link hover:underline"
+            >
+              Hired for {worker.job.title} ›
+            </Link>
           </>
         }
         actions={
-          <WorkerActions
-            workerId={worker.id}
-            workerName={worker.name}
-            status={worker.status}
-            hasCurrentVersion={worker.currentVersion !== null}
-          />
+          <div className="flex items-center gap-7 max-sm:mt-1">
+            <ScoreMetric score={worker.score} />
+            <WorkerActions
+              workerId={worker.id}
+              workerName={worker.name}
+              status={worker.status}
+              hasCurrentVersion={worker.currentVersion !== null}
+              permissions={worker.permissions}
+              floatOnMobile={floatingMobileActions}
+            />
+          </div>
         }
       />
 
-      <div className="mb-6 space-y-3">
-        {worker.health === "NEEDS_ATTENTION" && worker.healthReason ? (
-          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
-            <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden="true" />
-            <p>
-              <span className="font-medium">{worker.name} needs attention.</span> {worker.healthReason.replace(/\.?$/, ".")}
-            </p>
-            <Button variant="outline" size="sm" className="ml-auto shrink-0 bg-white" asChild>
-              <Link href={`/workers/${worker.id}?tab=performance`}>
-                Review performance
-                <ArrowRight aria-hidden="true" />
-              </Link>
-            </Button>
-          </div>
+      {/* One status for the worker, then the facts a manager glances at — all on one quiet line. */}
+      <p className="text-footnote mb-6 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-muted-foreground">
+        {inFlight ? (
+          <>
+            <StatusBadge kind="run" status={inFlight.status} />
+            <Link href={`/runs/${inFlight.id}`} className="text-link hover:underline">
+              {waiting ? "See what it needs ›" : "Watch live ›"}
+            </Link>
+          </>
+        ) : (
+          <StatusBadge kind="worker" status={worker.status} />
+        )}
+        <Dot />
+        <span title={formatDateTime(worker.hiredAt)}>Hired {formatDate(worker.hiredAt)}</span>
+        <Dot />
+        <span>{worker.schedule.description}</span>
+        <Dot />
+        <span>
+          {worker.status === "RETIRED" ? (
+            `Retired ${formatDate(worker.retiredAt)}`
+          ) : worker.status === "PAUSED" ? (
+            "Paused — no runs scheduled"
+          ) : worker.schedule.nextRunAt ? (
+            <>
+              Next run <RelativeTime iso={worker.schedule.nextRunAt} />
+            </>
+          ) : (
+            "Runs when you ask"
+          )}
+        </span>
+        {worker.currentVersion ? (
+          <>
+            <Dot />
+            <span className="metric">Version {worker.currentVersion.version}</span>
+          </>
         ) : null}
+      </p>
 
-        {inFlight ? <InFlightBanner name={worker.name} run={inFlight} pendingApprovals={worker.pendingApprovals} /> : null}
+      <div className="mb-8 space-y-3 empty:mb-0">
+        {waiting ? (
+          <Callout
+            tone="warning"
+            text={`${worker.name} is waiting on your go-ahead${
+              worker.pendingApprovals > 1 ? ` for ${worker.pendingApprovals} actions` : ""
+            } before this run can continue.`}
+            href="/approvals"
+            linkLabel="Review the request"
+          />
+        ) : worker.health === "NEEDS_ATTENTION" && worker.healthReason ? (
+          <Callout
+            tone="warning"
+            text={`${worker.name} needs attention. ${worker.healthReason.replace(/\.?$/, ".")}`}
+            href={`/workers/${worker.id}?tab=performance`}
+            linkLabel="See performance"
+          />
+        ) : null}
 
         {worker.openProposal ? (
-          <div className="flex items-start gap-2.5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-900">
-            <Sparkles className="mt-0.5 size-4 shrink-0 text-sky-600" aria-hidden="true" />
-            <p>
-              <span className="font-medium">
-                {worker.openProposal.changeReason === "REPLACEMENT" ? "A replacement is ready to review." : "A proposed change is waiting for you."}
-              </span>{" "}
-              Version {worker.openProposal.version} has been drafted but is not live yet.
-            </p>
-            <Button variant="outline" size="sm" className="ml-auto shrink-0 bg-white" asChild>
-              <Link href={`/workers/${worker.id}/replace/${worker.openProposal.versionId}`}>
-                Review proposal
-                <ArrowRight aria-hidden="true" />
-              </Link>
-            </Button>
-          </div>
+          <Callout
+            tone="neutral"
+            text={
+              worker.openProposal.changeReason === "REPLACEMENT"
+                ? `A replacement for ${worker.name} is drafted as version ${worker.openProposal.version}, and is not live until you decide.`
+                : `A change to how ${worker.name} works is drafted as version ${worker.openProposal.version}, and is not live until you decide.`
+            }
+            href={`/workers/${worker.id}/replace/${worker.openProposal.versionId}`}
+            linkLabel="Compare and decide"
+          />
         ) : null}
-
-        <div className="grid gap-4 rounded-xl bg-card p-4 ring-1 ring-foreground/10 sm:grid-cols-[auto_1fr] sm:items-center">
-          <div className="flex items-center gap-3 sm:pr-4 sm:border-r sm:border-border">
-            <ScoreRing score={worker.score} size={72} />
-            <div className="min-w-0">
-              <p className="eyebrow">Score</p>
-              <p className={cn("text-sm font-semibold", band.text)}>{band.label}</p>
-              <p className="text-xs text-muted-foreground">
-                {worker.scoreUpdatedAt ? (
-                  <>
-                    Updated <RelativeTime iso={worker.scoreUpdatedAt} />
-                  </>
-                ) : (
-                  "Scored after the first evaluated run"
-                )}
-              </p>
-            </div>
-          </div>
-
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm lg:grid-cols-4">
-            <Fact icon={CalendarDays} label="Hired">
-              <span title={formatDateTime(worker.hiredAt)}>{formatDate(worker.hiredAt)}</span>
-              {worker.retiredAt ? <span className="block text-xs text-muted-foreground">Retired {formatDate(worker.retiredAt)}</span> : null}
-            </Fact>
-            <Fact icon={CalendarClock} label="Schedule">
-              {worker.schedule.description}
-              <span className="block text-xs text-muted-foreground">
-                {worker.status !== "ACTIVE" ? (
-                  `Paused while ${statusLabel("worker", worker.status).toLowerCase()}`
-                ) : worker.schedule.nextRunAt ? (
-                  <>
-                    Next run <RelativeTime iso={worker.schedule.nextRunAt} />
-                  </>
-                ) : (
-                  "Runs when you ask"
-                )}
-              </span>
-            </Fact>
-            <Fact icon={Radio} label="Last run">
-              {worker.lastRunAt ? <RelativeTime iso={worker.lastRunAt} /> : "Not yet"}
-            </Fact>
-            <Fact icon={GitCommitHorizontal} label="Version">
-              {worker.currentVersion ? (
-                <>
-                  v{worker.currentVersion.version}
-                  <span className="block text-xs text-muted-foreground">
-                    {worker.currentVersion.changeReason === "INITIAL_HIRE"
-                      ? "Original hire"
-                      : worker.currentVersion.changeReason === "REPLACEMENT"
-                        ? "Replacement"
-                        : "Updated"}
-                    {worker.currentVersion.activatedAt ? <> · since {formatDate(worker.currentVersion.activatedAt)}</> : null}
-                  </span>
-                </>
-              ) : (
-                "No active version"
-              )}
-            </Fact>
-          </dl>
-        </div>
       </div>
     </>
   );
 }
 
-function Fact({ icon: Icon, label, children }: { icon: LucideIcon; label: string; children: ReactNode }) {
+function Dot() {
   return (
-    <div className="min-w-0">
-      <dt className="mb-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Icon className="size-3.5" aria-hidden="true" />
-        {label}
-      </dt>
-      <dd className="font-medium text-foreground">{children}</dd>
-    </div>
+    <span aria-hidden="true" className="text-tertiary">
+      ·
+    </span>
   );
 }
 
-function InFlightBanner({
-  name,
-  run,
-  pendingApprovals,
+/** The one soft-tinted panel on the page — used only when something is actually waiting on a person. */
+function Callout({
+  tone,
+  text,
+  href,
+  linkLabel,
 }: {
-  name: string;
-  run: NonNullable<WorkerHeaderView["inFlightRun"]>;
-  pendingApprovals: number;
+  tone: "warning" | "neutral";
+  text: ReactNode;
+  href: string;
+  linkLabel: string;
 }) {
-  const waiting = run.status === "WAITING_FOR_APPROVAL";
-  const tone = waiting ? "border-amber-200 bg-amber-50 text-amber-900" : "border-sky-200 bg-sky-50 text-sky-900";
-  const headline = waiting
-    ? `${name} is waiting on your approval`
-    : run.status === "RUNNING"
-      ? `${name} is working right now`
-      : `${name} is about to start a run`;
-  const detail = waiting
-    ? pendingApprovals > 0
-      ? `${pendingApprovals === 1 ? "One action needs" : `${pendingApprovals} actions need`} your go-ahead before the run can continue.`
-      : "The run is paused until someone decides on the request."
-    : run.trigger === "SCHEDULED"
-      ? "This is a scheduled run."
-      : run.trigger === "HIRE"
-        ? "First run after hiring."
-        : "Started on request.";
-
   return (
-    <div className={cn("flex items-center gap-3 rounded-lg border px-3 py-2.5 text-sm", tone)}>
-      <StatusBadge kind="run" status={run.status} />
-      <p className="min-w-0 flex-1">
-        <span className="font-medium">{headline}.</span> <span className="opacity-80">{detail}</span>
-      </p>
-      {waiting ? (
-        <Button variant="outline" size="sm" className="shrink-0 bg-white" asChild>
-          <Link href="/approvals">Decide</Link>
-        </Button>
-      ) : null}
-      <Button variant="outline" size="sm" className="shrink-0 bg-white" asChild>
-        <Link href={`/runs/${run.id}`}>
-          Watch live
-          <ArrowRight aria-hidden="true" />
-        </Link>
-      </Button>
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-[14px] px-4 py-3.5 text-[15px] text-pretty sm:flex-row sm:items-center sm:gap-6",
+        tone === "warning" ? "bg-warning-soft text-foreground" : "bg-muted text-foreground",
+      )}
+    >
+      <p className="min-w-0 flex-1">{text}</p>
+      <Link href={href} className="shrink-0 text-[15px] font-medium text-link hover:underline">
+        {linkLabel} ›
+      </Link>
     </div>
   );
 }

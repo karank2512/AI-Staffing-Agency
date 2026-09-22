@@ -1,4 +1,4 @@
-import type { RunStatus, WorkerHealth, WorkerStatus } from "@prisma/client";
+import type { RunStatus, UserRole, WorkerHealth, WorkerStatus } from "@prisma/client";
 import { endOfMonth, startOfDay, startOfMonth, subDays, subMonths } from "date-fns";
 import { listActivity, type ActivityItem } from "@/server/activity";
 import { db } from "@/server/db";
@@ -7,6 +7,7 @@ import { llm } from "@/server/models";
 import { TERMINAL_RUN_STATUSES } from "@/server/runtime/types";
 import { getUsageSummary } from "@/server/usage";
 import { listApprovals } from "./approvals";
+import { permissionSubset, WORKFORCE_PERMISSION_KEYS, type WorkforcePermissions } from "./permissions";
 
 /**
  * Read side of /workforce, the home page: headline numbers, the "Needs your attention" strip, the roster and the
@@ -87,6 +88,8 @@ export interface WorkerCardView {
 
 export interface WorkforceView {
   simulated: boolean;
+  /** What the viewer's role may do here — the page hides or disables the rest (the server enforces it anyway). */
+  permissions: WorkforcePermissions;
   stats: WorkforceStats;
   /** Ordered by urgency: approvals → workers needing attention → failed runs → rejected deliverables. */
   attention: AttentionItem[];
@@ -172,7 +175,11 @@ async function unresolvedRejections(organizationId: string, since: Date) {
     .slice(0, ATTENTION_ITEMS_PER_KIND);
 }
 
-export async function getWorkforce(organizationId: string, now: Date = new Date()): Promise<WorkforceView> {
+export async function getWorkforce(
+  organizationId: string,
+  now: Date = new Date(),
+  opts: { role?: UserRole } = {},
+): Promise<WorkforceView> {
   const monthStart = startOfMonth(now);
   const lastMonth = subMonths(now, 1);
   const attentionSince = subDays(now, ATTENTION_WINDOW_DAYS);
@@ -322,6 +329,7 @@ export async function getWorkforce(organizationId: string, now: Date = new Date(
 
   return {
     simulated: llm.isSimulated(),
+    permissions: permissionSubset(opts.role, WORKFORCE_PERMISSION_KEYS),
     stats: {
       activeWorkers: workers.filter((w) => w.status === "ACTIVE").length,
       pausedWorkers: workers.filter((w) => w.status === "PAUSED").length,

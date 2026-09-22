@@ -1,4 +1,5 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db } from "@/server/db";
 import { isAppError, notFound } from "@/server/errors";
@@ -52,6 +53,7 @@ async function cancel(args: CancelArgs): Promise<void> {
 }
 
 export async function cancelRun(s: SessionContext, runId: string): Promise<void> {
+  assertCan(s, "workers.run");
   await cancel({
     runId,
     organizationId: s.organizationId,

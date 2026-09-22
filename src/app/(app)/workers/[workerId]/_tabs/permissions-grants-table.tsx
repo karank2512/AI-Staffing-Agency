@@ -2,182 +2,211 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Lock } from "lucide-react";
 import { toast } from "sonner";
-import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { TONE_CLASSES } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { ToolGrantView } from "@/server/queries/worker-manage";
+import { Row, RowList, RowMeta, RowTitle, Sep } from "../_components/rows";
 import { updateToolGrantAction } from "../manage-actions";
 
-const CATEGORY_LABELS: Record<string, string> = {
-  research: "Research",
-  data: "Data",
-  output: "Output",
-  compute: "Compute",
-  communication: "Communication",
+/** Side effects in a manager's words; nothing is colour-coded — the words carry the weight. */
+const SIDE_EFFECT_LABELS: Record<string, string> = {
+  none: "Stays inside the workspace",
+  external_read: "Reads from the public web",
+  external_write: "Sends things outside the workspace",
 };
 
-/** Side effects in a manager's words; external writes get the attention colour because they leave the building. */
-const SIDE_EFFECT_META: Record<string, { label: string; tone: keyof typeof TONE_CLASSES }> = {
-  none: { label: "No side effects", tone: "idle" },
-  external_read: { label: "Reads the web", tone: "running" },
-  external_write: { label: "Sends externally", tone: "attention" },
-};
+type Access = "allowed" | "asks" | "off";
+
+const OPTIONS: Array<{ value: Access; label: string }> = [
+  { value: "allowed", label: "Allowed" },
+  { value: "asks", label: "Asks first" },
+  { value: "off", label: "Off" },
+];
+
+function accessOf(grant: ToolGrantView): Access {
+  if (grant.revoked) return "off";
+  return grant.requiresApproval ? "asks" : "allowed";
+}
 
 export interface PermissionsGrantsTableProps {
   workerId: string;
   workerName: string;
   grants: ToolGrantView[];
-  /** Retired workers keep their history but nothing can change. */
+  /** Retired workers, and roles that can't manage, see the state as words instead of controls. */
   readOnly: boolean;
 }
 
 export function PermissionsGrantsTable({ workerId, workerName, grants, readOnly }: PermissionsGrantsTableProps) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-[46%]">Tool</TableHead>
-          <TableHead>Why {workerName} needs it</TableHead>
-          <TableHead className="w-36 text-center">Requires approval</TableHead>
-          <TableHead className="w-28 text-right">Access</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {grants.map((grant) => (
-          <GrantRow key={grant.toolName} workerId={workerId} workerName={workerName} grant={grant} readOnly={readOnly} />
-        ))}
-      </TableBody>
-    </Table>
+    <RowList>
+      {grants.map((grant) => (
+        <GrantRow key={grant.toolName} workerId={workerId} workerName={workerName} grant={grant} readOnly={readOnly} />
+      ))}
+    </RowList>
   );
 }
 
-function GrantRow({ workerId, workerName, grant, readOnly }: { workerId: string; workerName: string; grant: ToolGrantView; readOnly: boolean }) {
+function GrantRow({
+  workerId,
+  workerName,
+  grant,
+  readOnly,
+}: {
+  workerId: string;
+  workerName: string;
+  grant: ToolGrantView;
+  readOnly: boolean;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  // Optimistic: the switch flips immediately and snaps back if the server refuses.
-  const [requiresApproval, setRequiresApproval] = useState(grant.requiresApproval);
-  const locked = grant.defaultRequiresApproval;
-  const sideEffect = grant.sideEffect ? SIDE_EFFECT_META[grant.sideEffect] : null;
-  const disabled = readOnly || grant.revoked || pending;
+  // Optimistic: the control moves immediately and snaps back if the server refuses.
+  const [access, setAccess] = useState<Access>(accessOf(grant));
+  const [confirmOff, setConfirmOff] = useState(false);
+  const alwaysAsks = grant.defaultRequiresApproval;
+  const sideEffect = grant.sideEffect ? SIDE_EFFECT_LABELS[grant.sideEffect] : null;
 
-  function toggleApproval(next: boolean) {
-    if (locked && !next) return;
-    const previous = requiresApproval;
-    setRequiresApproval(next);
+  function apply(next: Access) {
+    if (next === access || pending || readOnly) return;
+    if (next === "off") {
+      setConfirmOff(true);
+      return;
+    }
+    commit(next);
+  }
+
+  function commit(next: Access) {
+    const previous = access;
+    setAccess(next);
     startTransition(async () => {
-      const r = await updateToolGrantAction(workerId, grant.toolName, { requiresApproval: next });
+      const patch = next === "off" ? { revoked: true } : { revoked: false, requiresApproval: next === "asks" };
+      const r = await updateToolGrantAction(workerId, grant.toolName, patch);
       if (!r.ok) {
-        setRequiresApproval(previous);
+        setAccess(previous);
         toast.error(r.error);
         return;
       }
-      toast.success(next ? `${workerName} will ask before using ${grant.displayName}` : `${workerName} can use ${grant.displayName} without asking`);
+      toast.success(
+        next === "off"
+          ? `${workerName} can no longer use ${grant.displayName}`
+          : next === "asks"
+            ? `${workerName} will ask before using ${grant.displayName}`
+            : `${workerName} can use ${grant.displayName} without asking`,
+      );
       router.refresh();
     });
   }
 
-  async function setRevoked(revoked: boolean) {
-    const r = await updateToolGrantAction(workerId, grant.toolName, { revoked });
-    if (!r.ok) throw new Error(r.error);
-    toast.success(revoked ? `${workerName} can no longer use ${grant.displayName}` : `${grant.displayName} restored for ${workerName}`);
-    router.refresh();
-  }
-
   return (
-    <TableRow className={cn(grant.revoked && "bg-muted/30")}>
-      <TableCell className="align-top">
-        <div className="space-y-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className={cn("font-medium", grant.revoked && "text-muted-foreground line-through decoration-muted-foreground/50")}>{grant.displayName}</span>
-            <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px] text-muted-foreground">{grant.toolName}</code>
-          </div>
-          {grant.humanDescription ? <p className="text-xs text-pretty text-muted-foreground">{grant.humanDescription}</p> : null}
-          <div className="flex flex-wrap gap-1 pt-0.5">
-            {grant.category ? (
-              <Badge variant="outline" className="text-[11px]">
-                {CATEGORY_LABELS[grant.category] ?? grant.category}
-              </Badge>
-            ) : null}
-            {sideEffect ? <Badge className={cn("text-[11px]", TONE_CLASSES[sideEffect.tone].badge)}>{sideEffect.label}</Badge> : null}
-            {grant.maxCallsPerRun !== null ? (
-              <Badge variant="outline" className="text-[11px] tabular-nums">
-                ≤ {grant.maxCallsPerRun} calls / run
-              </Badge>
-            ) : null}
-          </div>
-        </div>
-      </TableCell>
-      <TableCell className="align-top">
-        {grant.reason ? (
-          <p className="text-[13px] text-pretty text-muted-foreground">{grant.reason}</p>
-        ) : (
-          <p className="text-xs text-muted-foreground italic">Not part of the current design.</p>
-        )}
-      </TableCell>
-      <TableCell className="align-top text-center">
-        <div className="inline-flex items-center gap-2">
-          <Switch
-            checked={requiresApproval}
-            disabled={disabled || (locked && requiresApproval)}
-            onCheckedChange={toggleApproval}
-            aria-label={`${grant.displayName} requires approval`}
-          />
-          {locked ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex" aria-label="Always requires approval">
-                  <Lock className="size-3.5 text-muted-foreground" aria-hidden="true" />
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>{grant.displayName} always requires your approval.</TooltipContent>
-            </Tooltip>
-          ) : pending ? (
-            <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-hidden="true" />
+    <Row className="flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-6">
+      <div className="min-w-0 flex-1">
+        <RowTitle className={cn(access === "off" && "text-muted-foreground")}>{grant.displayName}</RowTitle>
+        {grant.humanDescription ? (
+          <p className="text-footnote mt-1 max-w-[60ch] text-pretty text-muted-foreground">{grant.humanDescription}</p>
+        ) : null}
+        <RowMeta>
+          {sideEffect ? <span>{sideEffect}</span> : null}
+          {grant.maxCallsPerRun !== null ? (
+            <>
+              {sideEffect ? <Sep /> : null}
+              <span>at most {grant.maxCallsPerRun} calls a run</span>
+            </>
           ) : null}
+          {grant.reason ? (
+            <>
+              {sideEffect || grant.maxCallsPerRun !== null ? <Sep /> : null}
+              <span className="max-w-[46ch] truncate" title={grant.reason}>
+                {grant.reason}
+              </span>
+            </>
+          ) : !grant.inBlueprint ? (
+            <>
+              {sideEffect ? <Sep /> : null}
+              <span>Not part of the current design</span>
+            </>
+          ) : null}
+        </RowMeta>
+      </div>
+
+      {readOnly ? (
+        <span className="text-footnote shrink-0 text-muted-foreground">
+          {access === "off" ? "Off" : access === "asks" ? "Asks first" : "Allowed"}
+        </span>
+      ) : (
+        <div
+          role="radiogroup"
+          aria-label={`What ${workerName} may do with ${grant.displayName}`}
+          className="flex h-8 shrink-0 items-center gap-0.5 rounded-full bg-secondary p-0.5"
+        >
+          {OPTIONS.map((option) => {
+            const selected = access === option.value;
+            const locked = alwaysAsks && option.value === "allowed";
+            const button = (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={pending || locked}
+                onClick={() => apply(option.value)}
+                className={cn(
+                  "h-7 rounded-full px-3 text-[13px] font-medium transition-colors duration-200 ease-standard outline-none focus-visible:ring-4 focus-visible:ring-primary/30 disabled:cursor-default",
+                  selected ? "bg-card text-foreground shadow-[var(--elev-thumb)]" : "text-foreground/70 hover:text-foreground",
+                  locked && !selected && "opacity-40",
+                )}
+              >
+                {option.label}
+              </button>
+            );
+            return locked ? (
+              <Tooltip key={option.value}>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">{button}</span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{grant.displayName} always asks for your approval.</TooltipContent>
+              </Tooltip>
+            ) : (
+              button
+            );
+          })}
         </div>
-      </TableCell>
-      <TableCell className="align-top text-right">
-        {readOnly ? (
-          <span className="text-xs text-muted-foreground">{grant.revoked ? "Revoked" : "Granted"}</span>
-        ) : grant.revoked ? (
-          <ConfirmDialog
-            trigger={
-              <Button variant="outline" size="sm">
-                Restore
-              </Button>
-            }
-            title={`Restore ${grant.displayName} for ${workerName}?`}
-            description={`${workerName} will be able to use ${grant.displayName} again on the next run${grant.requiresApproval ? ", with your approval each time" : ""}.`}
-            confirmLabel="Restore access"
-            onConfirm={() => setRevoked(false)}
-          />
-        ) : (
-          <ConfirmDialog
-            trigger={
-              <Button variant="destructive" size="sm">
-                Revoke
-              </Button>
-            }
-            title={`Revoke ${grant.displayName} from ${workerName}?`}
-            description={
-              <>
-                Every future call to {grant.displayName} is refused. {workerName} will try to finish the job without it, which may lower
-                the quality of deliverables. You can restore it any time.
-              </>
-            }
-            confirmLabel="Revoke access"
-            destructive
-            onConfirm={() => setRevoked(true)}
-          />
-        )}
-      </TableCell>
-    </TableRow>
+      )}
+
+      <Dialog open={confirmOff} onOpenChange={setConfirmOff}>
+        <DialogContent showCloseButton={false} className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Turn off {grant.displayName}?</DialogTitle>
+            <DialogDescription>
+              Every future call is refused. {workerName} will try to finish the job without it, which may mean
+              thinner deliverables. You can switch it back on any time.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="secondary" onClick={() => setConfirmOff(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30"
+              onClick={() => {
+                setConfirmOff(false);
+                commit("off");
+              }}
+            >
+              Turn it off
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Row>
   );
 }

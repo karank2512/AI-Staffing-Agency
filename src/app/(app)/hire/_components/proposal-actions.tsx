@@ -2,39 +2,36 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Handshake, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatUsd, formatUsdPrecise } from "@/lib/format";
 import { hireWorkerAction, proposeWorkerAction, reviseJobSpecAction } from "../actions";
 import { WORKER_NAME_MAX_CHARS } from "../schema";
-import { DiscardJobButton } from "./discard-job-button";
+import { DiscardJobLink } from "./discard-job-button";
+import { InlineError, StepBar, stepLinkClass } from "./step-bar";
 
 export interface ProposalActionsProps {
   jobId: string;
   proposedName: string;
-  title: string;
-  perRunUsd: number;
-  monthlyUsd: number;
-  cadenceLabel: string;
-  firstRunLabel: string;
-  /** Simulated designs are deterministic, so "Regenerate" is told apart from a real redesign in the toast. */
+  /** Simulated designs are deterministic, so "design a different worker" is told apart from a real redesign. */
   simulated: boolean;
+  /** workers.hire */
+  canHire: boolean;
+  /** jobs.manage — revising the spec, redesigning and discarding all go through it. */
+  canManage: boolean;
 }
 
 type Kind = "hire" | "regenerate" | "revise";
 
 /**
- * The hire panel next to the proposal. One primary action ("Hire Alex"), an optional rename, and two ways back:
- * regenerate the design or return to the spec. The transition covers the action AND the router refresh / push
- * that follows, so buttons stay locked until the next step is actually on screen.
+ * The one decision of the flow: hire them, or ask for changes. Everything else — a different name, a different
+ * design, discarding the job — is a quiet text link, so the page keeps exactly one primary pill.
  */
-export function ProposalActions({ jobId, proposedName, title, perRunUsd, monthlyUsd, cadenceLabel, firstRunLabel, simulated }: ProposalActionsProps) {
+export function ProposalActions({ jobId, proposedName, simulated, canHire, canManage }: ProposalActionsProps) {
   const router = useRouter();
   const [name, setName] = useState("");
+  const [renaming, setRenaming] = useState(false);
   const [kind, setKind] = useState<Kind | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -78,8 +75,8 @@ export function ProposalActions({ jobId, proposedName, title, perRunUsd, monthly
       }
       // The mock designer is a pure function of the spec: same spec → same worker. Say so instead of pretending.
       if (simulated && result.data.workerName === proposedName) {
-        toast.success(`Proposal regenerated — ${proposedName} is still the best fit.`, {
-          description: "Simulated mode designs deterministically. Edit the spec to change the design.",
+        toast.success(`Designed again — ${proposedName} is still the best fit.`, {
+          description: "Simulated mode designs deterministically. Change the job spec to change the design.",
         });
       } else {
         toast.success(`Redesigned the worker. Meet ${result.data.workerName}.`);
@@ -96,38 +93,21 @@ export function ProposalActions({ jobId, proposedName, title, perRunUsd, monthly
         toast.error(result.error);
         return;
       }
-      toast.success("Back to the spec. Approve it again to get a fresh proposal.");
+      toast.success("Back to the job spec. Approve it again to get a fresh proposal.");
       router.refresh();
     });
   }
 
+  // A fragment, not a wrapper: StepBar's sticky half has to sit directly in the page column to travel with the
+  // scroll on a phone. A short wrapping div would pin it to the very bottom of this long profile instead.
   return (
-    <Card className="lg:sticky lg:top-6" aria-busy={pending}>
-      <CardHeader>
-        <CardTitle>Hire {displayName}?</CardTitle>
-        <CardDescription>{title}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <dl className="grid grid-cols-2 gap-2 text-sm">
-          <div className="rounded-lg border bg-muted/40 p-2.5">
-            <dt className="text-xs text-muted-foreground">Per run</dt>
-            <dd className="font-semibold metric">{formatUsdPrecise(perRunUsd)}</dd>
-          </div>
-          <div className="rounded-lg border bg-muted/40 p-2.5">
-            <dt className="text-xs text-muted-foreground">Per month</dt>
-            <dd className="font-semibold metric">{formatUsd(monthlyUsd)}</dd>
-          </div>
-          <div className="col-span-2 rounded-lg border bg-muted/40 p-2.5">
-            <dt className="text-xs text-muted-foreground">Schedule</dt>
-            <dd className="font-medium">{cadenceLabel}</dd>
-            <dd className="text-xs text-muted-foreground">{firstRunLabel}</dd>
-          </div>
-        </dl>
-
-        <div className="space-y-2">
-          <Label htmlFor="worker-name">Give them a different name (optional)</Label>
+    <>
+      {renaming ? (
+        <div className="mt-8 max-w-sm space-y-1.5">
+          <Label htmlFor="worker-name">Call them something else</Label>
           <Input
             id="worker-name"
+            autoFocus
             value={name}
             maxLength={WORKER_NAME_MAX_CHARS + 10}
             placeholder={proposedName}
@@ -138,36 +118,52 @@ export function ProposalActions({ jobId, proposedName, title, perRunUsd, monthly
               if (error) setError(null);
             }}
           />
-          {nameTooLong ? <p className="text-xs text-rose-600">Keep it under {WORKER_NAME_MAX_CHARS} characters.</p> : null}
+          {nameTooLong ? <p className="text-footnote text-danger">Keep it under {WORKER_NAME_MAX_CHARS} characters.</p> : null}
         </div>
+      ) : null}
 
-        {error ? (
-          <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-            {error}
-          </p>
+      {error ? <InlineError className="mt-6">{error}</InlineError> : null}
+
+      <StepBar
+        note={
+          canHire ? (
+            <>
+              <span className="block">Their first run starts right away. Pause, replace or retire them any time.</span>
+              <span className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 max-sm:justify-center">
+                {renaming ? null : (
+                  <button type="button" onClick={() => setRenaming(true)} disabled={pending} className={stepLinkClass}>
+                    Use a different name
+                  </button>
+                )}
+                {canManage ? (
+                  <button type="button" onClick={regenerate} disabled={pending} className={stepLinkClass}>
+                    {active === "regenerate" ? "Designing…" : "Design a different worker"}
+                  </button>
+                ) : null}
+                {canManage ? <DiscardJobLink jobId={jobId} disabled={pending} /> : null}
+              </span>
+            </>
+          ) : (
+            "Only workspace admins and owners can hire workers. Ask one of them to make the call."
+          )
+        }
+      >
+        {canManage ? (
+          <Button type="button" variant="secondary" size="lg" onClick={backToSpec} disabled={pending} className="max-sm:w-full">
+            {active === "revise" ? "Opening the spec…" : "Ask for changes"}
+          </Button>
         ) : null}
-
-        <Button type="button" size="lg" className="w-full" onClick={hire} disabled={pending || nameTooLong}>
-          {active === "hire" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Handshake aria-hidden="true" />}
+        <Button
+          type="button"
+          size="lg"
+          onClick={hire}
+          aria-busy={pending}
+          disabled={pending || nameTooLong || !canHire}
+          className="max-sm:w-full"
+        >
           {active === "hire" ? `Hiring ${displayName}…` : `Hire ${displayName}`}
         </Button>
-        <p className="text-center text-xs text-muted-foreground">Their first run starts right away. Pause, replace or retire them any time.</p>
-      </CardContent>
-      <CardFooter className="flex-col items-stretch gap-2">
-        <div className="grid grid-cols-2 gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={regenerate} disabled={pending}>
-            {active === "regenerate" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
-            {active === "regenerate" ? "Redesigning…" : "Regenerate proposal"}
-          </Button>
-          <Button type="button" variant="outline" size="sm" onClick={backToSpec} disabled={pending}>
-            {active === "revise" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ArrowLeft aria-hidden="true" />}
-            {active === "revise" ? "Opening spec…" : "Back to spec"}
-          </Button>
-        </div>
-        <div className="flex justify-center">
-          <DiscardJobButton jobId={jobId} disabled={pending} />
-        </div>
-      </CardFooter>
-    </Card>
+      </StepBar>
+    </>
   );
 }

@@ -1,51 +1,45 @@
 import Link from "next/link";
-import { Users } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { RelativeTime } from "@/components/relative-time";
 import { ScoreRing } from "@/components/score-ring";
 import { StatusBadge } from "@/components/status-badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkerAvatar } from "@/components/worker-avatar";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { pluralize } from "@/lib/format";
 import type { JobWorkerItem } from "@/server/queries/jobs";
 
-function WorkerRow({ worker, current }: { worker: JobWorkerItem; current: boolean }) {
+function WorkerRow({ worker }: { worker: JobWorkerItem }) {
+  const facts = [worker.title, worker.versionNumber ? `v${worker.versionNumber}` : null, pluralize(worker.runs, "run")]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <li className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-      <Link href={`/workers/${worker.id}`} className="shrink-0">
+    <li className="border-b border-border py-4 first:pt-0 last:border-0 last:pb-0">
+      <Link href={`/workers/${worker.id}`} className="group/worker flex items-center gap-3 outline-none">
         <WorkerAvatar name={worker.name} color={worker.avatarColor} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-medium text-foreground group-hover/worker:text-link">{worker.name}</span>
+          <span className="block truncate text-footnote text-muted-foreground">{facts}</span>
+          <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-footnote text-muted-foreground">
+            <StatusBadge kind="worker" status={worker.status} />
+            <span aria-hidden="true">·</span>
+            {worker.status === "RETIRED" && worker.retiredAt ? (
+              <span>
+                retired <RelativeTime iso={worker.retiredAt} />
+              </span>
+            ) : worker.lastRunAt ? (
+              <span>
+                last worked <RelativeTime iso={worker.lastRunAt} />
+              </span>
+            ) : (
+              <span>
+                hired <RelativeTime iso={worker.hiredAt} />
+              </span>
+            )}
+          </span>
+        </span>
+        <ScoreRing score={worker.score} size={36} />
       </Link>
-      <div className="min-w-0 flex-1">
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <Link href={`/workers/${worker.id}`} className="truncate text-sm font-medium hover:underline">
-            {worker.name}
-          </Link>
-          <StatusBadge kind="worker" status={worker.status} />
-          {current && worker.health !== "UNKNOWN" ? <StatusBadge kind="health" status={worker.health} /> : null}
-        </p>
-        <p className="truncate text-xs text-muted-foreground">
-          {worker.title}
-          {worker.versionNumber ? ` · v${worker.versionNumber}` : ""}
-          {" · "}
-          {pluralize(worker.runs, "run")}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {worker.status === "RETIRED" && worker.retiredAt ? (
-            <>
-              Retired <RelativeTime iso={worker.retiredAt} />
-            </>
-          ) : worker.lastRunAt ? (
-            <>
-              Last worked <RelativeTime iso={worker.lastRunAt} />
-            </>
-          ) : (
-            <>
-              Hired <RelativeTime iso={worker.hiredAt} />
-            </>
-          )}
-        </p>
-      </div>
-      <ScoreRing score={worker.score} size={32} />
     </li>
   );
 }
@@ -60,19 +54,20 @@ export function JobWorkers({ workers, currentWorkerId }: { workers: JobWorkerIte
       <CardHeader>
         <CardTitle>Workers on this job</CardTitle>
         <CardDescription>
-          {workers.length === 0 ? "Nobody has been hired yet." : current.length > 0 ? "Who holds the seat, and who held it before." : "Former workers on this seat."}
+          {workers.length === 0
+            ? "Nobody has been hired yet."
+            : current.length > 0
+              ? "Who holds the seat, and who held it before."
+              : "Former workers on this seat."}
         </CardDescription>
       </CardHeader>
       <CardContent>
         {workers.length === 0 ? (
-          <EmptyState icon={Users} title="No worker yet" description="Once you hire, they show up here with their score." className="py-8" />
+          <EmptyState title="No worker yet" description="Once you hire, they show up here with their score." className="py-10" />
         ) : (
-          <ul className="divide-y">
-            {current.map((w) => (
-              <WorkerRow key={w.id} worker={w} current />
-            ))}
-            {former.map((w) => (
-              <WorkerRow key={w.id} worker={w} current={false} />
+          <ul>
+            {[...current, ...former].map((w) => (
+              <WorkerRow key={w.id} worker={w} />
             ))}
           </ul>
         )}

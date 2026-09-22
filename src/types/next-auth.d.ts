@@ -4,12 +4,14 @@ import type { DefaultSession } from "next-auth";
 /**
  * Auth.js module augmentation: the identity fields our JWT and session carry.
  * `authorizeCredentials()` returns the `User` shape; the jwt callback copies it onto the token as
- * `userId` / `organizationId` / `role`; the session callback copies the token onto `session.user`.
+ * `userId` / `organizationId` / `role` / `sv` (+ `authAt` for the absolute session lifetime); the session
+ * callback copies the token onto `session.user`.
  */
 declare module "next-auth" {
   interface User {
     organizationId: string;
     role: UserRole;
+    sessionVersion: number;
   }
 
   interface Session {
@@ -17,6 +19,11 @@ declare module "next-auth" {
       id: string;
       organizationId: string;
       role: UserRole;
+      /**
+       * Revocation counter: `loadSessionContext` refuses a token whose value is behind the user's.
+       * Absent on cookies minted before this phase — those are treated as stale (forced re-login).
+       */
+      sessionVersion?: number;
     } & DefaultSession["user"];
   }
 }
@@ -27,5 +34,9 @@ declare module "@auth/core/jwt" {
     userId?: string;
     organizationId?: string;
     role?: UserRole;
+    /** User.sessionVersion at sign-in. */
+    sv?: number;
+    /** Unix seconds at which credentials were last presented — the absolute session clock. */
+    authAt?: number;
   }
 }

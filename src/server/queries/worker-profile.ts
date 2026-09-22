@@ -5,6 +5,7 @@ import type {
   ReviewRecommendation,
   RunStatus,
   RunTrigger,
+  UserRole,
   VersionChangeReason,
   WorkerHealth,
   WorkerStatus,
@@ -30,6 +31,7 @@ import { computeWorkerScore, getWorkerMetrics } from "@/server/evaluation";
 import { llm } from "@/server/models";
 import { tools } from "@/server/tools";
 import { getWorkerCostSummary, type WorkerCostSummary } from "@/server/usage";
+import { permissionSubset, WORKER_PERMISSION_KEYS, type WorkerPermissions } from "./permissions";
 
 /**
  * Read models for /workers/[workerId] (header + overview · activity · deliverables · performance · cost tabs).
@@ -113,9 +115,15 @@ export interface WorkerHeaderView {
   pendingApprovals: number;
   /** An undecided replacement / spec-change proposal, if one exists. */
   openProposal: { versionId: string; version: number; changeReason: VersionChangeReason } | null;
+  /** What the viewer's role may do with this worker; the server enforces the same rules regardless. */
+  permissions: WorkerPermissions;
 }
 
-export async function getWorkerHeader(organizationId: string, workerId: string): Promise<WorkerHeaderView> {
+export async function getWorkerHeader(
+  organizationId: string,
+  workerId: string,
+  opts: { role?: UserRole } = {},
+): Promise<WorkerHeaderView> {
   const worker = await db.worker.findFirst({
     where: { id: workerId, organizationId },
     include: {
@@ -170,6 +178,7 @@ export async function getWorkerHeader(organizationId: string, workerId: string):
     inFlightRun: inFlight ? { id: inFlight.id, status: inFlight.status, trigger: inFlight.trigger, createdAt: inFlight.createdAt.toISOString() } : null,
     pendingApprovals,
     openProposal: proposal ? { versionId: proposal.id, version: proposal.version, changeReason: proposal.changeReason } : null,
+    permissions: permissionSubset(opts.role, WORKER_PERMISSION_KEYS),
   };
 }
 

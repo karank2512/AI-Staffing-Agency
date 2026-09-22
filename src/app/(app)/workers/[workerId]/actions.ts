@@ -7,14 +7,13 @@ import { requireSession } from "@/server/auth";
 import { generatePerformanceReview } from "@/server/evaluation";
 import { getWorkerReview } from "@/server/queries/worker-profile";
 import { pauseWorker, resumeWorker, retireWorker, startRun } from "@/server/workers";
+import { limitLlmAction, limitRunAction, parseId } from "../../_lib/action-guards";
 
 /**
  * Server actions for the worker profile header: run now (with optional one-off instructions), pause / resume /
- * retire and "Performance review". Every action: requireSession → validate → workers/evaluation call →
- * revalidate. Results are plain JSON; the client toasts.
+ * retire and "Performance review". Every action: requireSession → rate limit → validate → workers/evaluation
+ * call → revalidate. Roles (workers.run / workers.manage / reviews.generate) are enforced inside those modules.
  */
-
-const WorkerIdSchema = z.string().min(1, "Missing worker");
 
 /** The textarea's free text: one instruction per non-empty line, capped so the runtime's own limits never trip. */
 const InstructionsSchema = z
@@ -39,7 +38,8 @@ function revalidateWorker(workerId: string) {
 export async function runNowAction(workerId: string, input: { instructions?: string } = {}): Promise<ActionResult<{ runId: string }>> {
   return runAction(async () => {
     const s = await requireSession();
-    const id = WorkerIdSchema.parse(workerId);
+    await limitRunAction(s);
+    const id = parseId(workerId, "Worker");
     const instructions = InstructionsSchema.parse(input.instructions);
     const { runId } = await startRun(s, id, instructions.length > 0 ? { instructions } : {});
     revalidateWorker(id);
@@ -51,7 +51,7 @@ export async function runNowAction(workerId: string, input: { instructions?: str
 export async function pauseWorkerAction(workerId: string): Promise<ActionResult> {
   return runAction(async () => {
     const s = await requireSession();
-    const id = WorkerIdSchema.parse(workerId);
+    const id = parseId(workerId, "Worker");
     await pauseWorker(s, id);
     revalidateWorker(id);
     revalidatePath("/approvals");
@@ -61,7 +61,7 @@ export async function pauseWorkerAction(workerId: string): Promise<ActionResult>
 export async function resumeWorkerAction(workerId: string): Promise<ActionResult> {
   return runAction(async () => {
     const s = await requireSession();
-    const id = WorkerIdSchema.parse(workerId);
+    const id = parseId(workerId, "Worker");
     await resumeWorker(s, id);
     revalidateWorker(id);
   });
@@ -70,7 +70,7 @@ export async function resumeWorkerAction(workerId: string): Promise<ActionResult
 export async function retireWorkerAction(workerId: string): Promise<ActionResult> {
   return runAction(async () => {
     const s = await requireSession();
-    const id = WorkerIdSchema.parse(workerId);
+    const id = parseId(workerId, "Worker");
     await retireWorker(s, id);
     revalidateWorker(id);
     revalidatePath("/approvals");
@@ -83,7 +83,8 @@ export async function generateReviewAction(
 ): Promise<ActionResult<{ reviewId: string; recommendation: "KEEP" | "IMPROVE" | "REPLACE"; overallScore: number }>> {
   return runAction(async () => {
     const s = await requireSession();
-    const id = WorkerIdSchema.parse(workerId);
+    await limitLlmAction(s);
+    const id = parseId(workerId, "Worker");
     const { reviewId } = await generatePerformanceReview(s, id);
     const review = await getWorkerReview(s.organizationId, reviewId);
     revalidateWorker(id);

@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2, Play } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { startRunAction } from "../actions";
@@ -11,11 +10,11 @@ import { startRunAction } from "../actions";
 export interface RunNowButtonProps {
   workerId: string;
   workerName: string;
-  /** Disabled with a reason when the worker cannot take new work right now. */
+  /** Disabled with a reason when the worker can't take new work right now, or the viewer can't start one. */
   disabledReason?: string;
 }
 
-/** Queues a manual run and confirms with a link to it. Small client leaf; the card around it stays a server component. */
+/** Queues a manual run and confirms with a link to it. A small client leaf; the card around it stays a server component. */
 export function RunNowButton({ workerId, workerName, disabledReason }: RunNowButtonProps) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
@@ -30,8 +29,12 @@ export function RunNowButton({ workerId, workerName, disabledReason }: RunNowBut
         return;
       }
       toast.success(`${workerName} is on it`, {
-        description: "The run is queued and will start in a moment.",
-        action: <Link href={`/runs/${result.data.runId}`} className="text-xs font-medium underline underline-offset-2">Watch it</Link>,
+        description: "The run is queued and starts in a moment.",
+        action: (
+          <Link href={`/runs/${result.data.runId}`} className="text-footnote font-medium text-link">
+            Watch
+          </Link>
+        ),
       });
       router.refresh();
     } finally {
@@ -42,15 +45,15 @@ export function RunNowButton({ workerId, workerName, disabledReason }: RunNowBut
   return (
     <Button
       type="button"
-      variant="outline"
+      variant="secondary"
       size="sm"
       onClick={run}
       disabled={pending || Boolean(disabledReason)}
       title={disabledReason}
       aria-label={`Run ${workerName} now`}
+      className="max-sm:h-11 max-sm:px-5"
     >
-      {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
-      Run now
+      {pending ? "Starting…" : "Run now"}
     </Button>
   );
 }

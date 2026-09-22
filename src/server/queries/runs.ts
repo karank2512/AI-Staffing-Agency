@@ -8,6 +8,7 @@ import type {
   RunStepStatus,
   RunTrigger,
   ToolCallStatus,
+  UserRole,
   WorkerVersionStatus,
 } from "@prisma/client";
 import { db } from "@/server/db";
@@ -16,6 +17,7 @@ import { EvaluationDetailsSchema, type EvaluationDetails } from "@/server/domain
 import { notFound } from "@/server/errors";
 import { runScore } from "@/server/evaluation";
 import { RunInputSchema, RunOutputSchema, type RunInput, type RunLiveView, type RunOutput } from "@/server/runtime/types";
+import { permissionSubset, RUN_PERMISSION_KEYS, type RunPermissions } from "./permissions";
 
 /**
  * Read models for /runs/[runId] and GET /api/runs/[runId]. Everything is org-scoped and returns plain JSON
@@ -247,6 +249,8 @@ export interface RunDetail {
   checkpoint: unknown;
   /** Queue/lease fields for the debug trace. */
   queue: { availableAt: string; lockedBy: string | null; lockedAt: string | null; heartbeatAt: string | null; updatedAt: string };
+  /** Cancel / retry / decide: the buttons this viewer's role may use (the runtime enforces the same rules). */
+  permissions: RunPermissions;
 }
 
 function parseDetails(value: unknown): EvaluationDetails | null {
@@ -259,7 +263,11 @@ function approvalIdOf(input: unknown): string | null {
   return typeof id === "string" ? id : null;
 }
 
-export async function getRunDetail(organizationId: string, runId: string): Promise<RunDetail> {
+export async function getRunDetail(
+  organizationId: string,
+  runId: string,
+  opts: { role?: UserRole } = {},
+): Promise<RunDetail> {
   const run = await db.run.findFirst({
     where: { id: runId, organizationId },
     include: {
@@ -450,6 +458,7 @@ export async function getRunDetail(organizationId: string, runId: string): Promi
       heartbeatAt: iso(run.heartbeatAt),
       updatedAt: run.updatedAt.toISOString(),
     },
+    permissions: permissionSubset(opts.role, RUN_PERMISSION_KEYS),
   };
 }
 

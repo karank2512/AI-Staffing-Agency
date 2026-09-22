@@ -1,6 +1,7 @@
 import { unstable_rethrow } from "next/navigation";
 import { ZodError } from "zod";
 import { isAppError } from "@/server/errors";
+import { CLIENT_SAFE_ERROR_CODES, GENERIC_PUBLIC_ERROR, publicErrorMessage } from "@/server/security";
 
 /**
  * The only shape a server action returns to the client. Actions never throw across the network boundary:
@@ -11,7 +12,7 @@ import { isAppError } from "@/server/errors";
  */
 export type ActionResult<T = void> = { ok: true; data: T } | { ok: false; error: string };
 
-export const GENERIC_ACTION_ERROR = "Something went wrong. Please try again.";
+export const GENERIC_ACTION_ERROR = GENERIC_PUBLIC_ERROR;
 
 /**
  * Wrap the body of a server action.
@@ -34,10 +35,13 @@ export async function runAction<T = void>(fn: () => Promise<T>): Promise<ActionR
     // MUST be first: redirect() / notFound() (e.g. from requireSession) are thrown control-flow signals that
     // Next.js needs to see — swallowing them would turn a sign-in redirect into an error toast.
     unstable_rethrow(e);
-    if (isAppError(e)) return { ok: false, error: e.message };
+    // An AppError whose code is client-safe carries a message written FOR the user (see
+    // CLIENT_SAFE_ERROR_CODES). Everything else — INTERNAL, MODEL_ERROR, TOOL_ERROR, a raw exception —
+    // could leak provider text, SQL or stack detail, so the user gets one generic sentence plus a
+    // reference, and the real cause is logged under that reference (F-009 / INF-13).
+    if (isAppError(e) && CLIENT_SAFE_ERROR_CODES.has(e.code)) return { ok: false, error: e.message };
     if (e instanceof ZodError) return { ok: false, error: zodMessage(e) };
-    console.error("[action] unexpected error", e);
-    return { ok: false, error: GENERIC_ACTION_ERROR };
+    return { ok: false, error: publicErrorMessage(e).message };
   }
 }
 

@@ -1,9 +1,10 @@
-import type { DeliverableFormat, DeliverableStatus, EvaluationType, RunStatus } from "@prisma/client";
+import type { DeliverableFormat, DeliverableStatus, EvaluationType, RunStatus, UserRole } from "@prisma/client";
 import Papa from "papaparse";
 import { db } from "@/server/db";
 import { EvaluationDetailsSchema, type EvaluationDetails } from "@/server/domain/evaluation";
 import { JobSpecSchema } from "@/server/domain/job-spec";
 import { notFound } from "@/server/errors";
+import { DELIVERABLE_PERMISSION_KEYS, permissionSubset, type DeliverablePermissions } from "./permissions";
 
 /**
  * Read models for /deliverables and /deliverables/[deliverableId]. Org-scoped, plain JSON out.
@@ -140,6 +141,8 @@ export interface DeliverableDetail {
   run: { id: string; status: RunStatus; simulated: boolean; finishedAt: string | null };
   version: { id: string; version: number };
   evaluations: DeliverableEvaluationView[];
+  /** Accept / reject is deliverables.review; the page hides the buttons for anyone without it. */
+  permissions: DeliverablePermissions;
 }
 
 function parseDetails(value: unknown): EvaluationDetails | null {
@@ -147,7 +150,11 @@ function parseDetails(value: unknown): EvaluationDetails | null {
   return parsed.success ? parsed.data : null;
 }
 
-export async function getDeliverableDetail(organizationId: string, deliverableId: string): Promise<DeliverableDetail> {
+export async function getDeliverableDetail(
+  organizationId: string,
+  deliverableId: string,
+  opts: { role?: UserRole } = {},
+): Promise<DeliverableDetail> {
   const d = await db.deliverable.findFirst({
     where: { id: deliverableId, organizationId },
     include: {
@@ -193,6 +200,7 @@ export async function getDeliverableDetail(organizationId: string, deliverableId
       details: parseDetails(e.details),
       createdAt: e.createdAt.toISOString(),
     })),
+    permissions: permissionSubset(opts.role, DELIVERABLE_PERMISSION_KEYS),
   };
 }
 

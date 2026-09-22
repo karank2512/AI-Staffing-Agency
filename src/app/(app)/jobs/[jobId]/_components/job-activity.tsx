@@ -1,10 +1,10 @@
 import Link from "next/link";
-import { Activity, Bot, UserRound } from "lucide-react";
 import type { ActivityType } from "@prisma/client";
 import { EmptyState } from "@/components/empty-state";
 import { RelativeTime } from "@/components/relative-time";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkerAvatar } from "@/components/worker-avatar";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { initialsOf } from "@/lib/initials";
 import { TONE_CLASSES, type StatusTone } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { ActivityItem } from "@/server/activity";
@@ -26,15 +26,17 @@ const EVENT_TONE: Partial<Record<ActivityType, StatusTone>> = {
 
 function Actor({ item }: { item: ActivityItem }) {
   if (item.worker) return <WorkerAvatar name={item.worker.name} color={item.worker.avatarColor} size="sm" />;
-  const Icon = item.actorType === "USER" ? UserRound : Bot;
   return (
-    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground ring-1 ring-foreground/5">
-      <Icon className="size-3.5" aria-hidden="true" />
+    <span
+      aria-hidden="true"
+      className="flex size-8 shrink-0 items-center justify-center rounded-full bg-secondary text-caption font-semibold text-muted-foreground"
+    >
+      {item.actorName ? initialsOf(item.actorName) : "·"}
     </span>
   );
 }
 
-/** The job's story so far — hires, runs, deliverables, reviews — with each headline linking to what it describes. */
+/** The job's story so far — hires, runs, deliverables, reviews — as sentences with the time on the right. */
 export function JobActivity({ items }: { items: ActivityItem[] }) {
   return (
     <Card>
@@ -44,36 +46,40 @@ export function JobActivity({ items }: { items: ActivityItem[] }) {
       </CardHeader>
       <CardContent>
         {items.length === 0 ? (
-          <EmptyState icon={Activity} title="Quiet so far" description="Events appear here as the job moves along." className="py-8" />
+          <EmptyState title="Quiet so far" description="Events appear here as the job moves along." className="py-10" />
         ) : (
-          <ol className="space-y-4">
+          <ol>
             {items.map((item) => {
               const tone = EVENT_TONE[item.type];
               return (
-                <li key={item.id} className="flex gap-3">
-                  <div className="relative shrink-0">
+                <li key={item.id} className="flex gap-3 border-b border-border py-3.5 first:pt-0 last:border-0 last:pb-0">
+                  <span className="relative shrink-0">
                     <Actor item={item} />
                     {tone ? (
                       <span
                         aria-hidden="true"
-                        className={cn("absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-card", TONE_CLASSES[tone].dot)}
+                        className={cn("absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-card", TONE_CLASSES[tone].dot)}
                       />
                     ) : null}
-                  </div>
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm leading-5 text-pretty">
-                      {item.href ? (
-                        <Link href={item.href} className="font-medium hover:underline">
-                          {item.title}
-                        </Link>
-                      ) : (
-                        <span className="font-medium">{item.title}</span>
-                      )}
+                    <p className="flex items-baseline justify-between gap-3">
+                      <span className="min-w-0 text-[15px] text-pretty">
+                        {item.href ? (
+                          <Link href={item.href} className="hover:text-link hover:underline">
+                            {item.title}
+                          </Link>
+                        ) : (
+                          item.title
+                        )}
+                      </span>
+                      <span className="shrink-0 text-footnote text-muted-foreground">
+                        <RelativeTime iso={item.createdAt} />
+                      </span>
                     </p>
-                    {item.detail ? <p className="mt-0.5 line-clamp-2 text-xs text-pretty text-muted-foreground">{item.detail}</p> : null}
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      <RelativeTime iso={item.createdAt} />
-                    </p>
+                    {item.detail ? (
+                      <p className="mt-0.5 line-clamp-2 text-footnote text-pretty text-muted-foreground">{item.detail}</p>
+                    ) : null}
                   </div>
                 </li>
               );

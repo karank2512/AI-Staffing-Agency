@@ -1,10 +1,13 @@
-import { Bug, ChevronRight } from "lucide-react";
-import { CopyButton } from "@/components/copy-button";
+import { ChevronDown } from "lucide-react";
 import { JsonView } from "@/components/json-view";
 import { formatDateTime } from "@/lib/format";
 import type { RunDetail } from "@/server/queries/runs";
 
-/** Collapsed by default: the durable checkpoint, the queue lease and the whole read model as raw JSON. */
+/**
+ * Troubleshooting, deliberately demoted: one collapsed row that opens onto the durable checkpoint, the queue
+ * lease and the raw read model. Native `<details>` keeps it a server component; the styling matches the
+ * accordion rows used elsewhere.
+ */
 export function DebugTrace({ detail }: { detail: RunDetail }) {
   const { live, queue, checkpoint } = detail;
   const rows: Array<[string, string]> = [
@@ -18,29 +21,30 @@ export function DebugTrace({ detail }: { detail: RunDetail }) {
   ];
 
   return (
-    <details className="group rounded-xl bg-card ring-1 ring-foreground/10">
-      <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium select-none [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-4 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
-        <Bug className="size-4 text-muted-foreground" aria-hidden="true" />
-        Debug trace
-        <span className="ml-auto flex items-center gap-2 text-xs font-normal text-muted-foreground">
-          <span className="font-mono">{live.run.id}</span>
-          <CopyButton value={live.run.id} />
-        </span>
+    <details className="group/debug border-t border-border">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-[17px] font-semibold tracking-[-0.012em] select-none [&::-webkit-details-marker]:hidden">
+        Raw model calls and tool traces
+        <ChevronDown
+          className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-[240ms] ease-standard group-open/debug:rotate-180"
+          aria-hidden="true"
+        />
       </summary>
-      <div className="space-y-4 border-t px-4 py-4">
-        <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+      <div className="space-y-5 pb-6">
+        <p className="text-[15px] text-muted-foreground">For troubleshooting — nothing here changes what the worker did.</p>
+        <dl className="grid gap-x-10 gap-y-0 sm:grid-cols-2">
           {rows.map(([label, value]) => (
-            <div key={label} className="flex justify-between gap-4 border-b border-dashed py-1 last:border-0 sm:last:border-b">
+            <div key={label} className="flex justify-between gap-4 border-b border-border py-2 text-footnote">
               <dt className="text-muted-foreground">{label}</dt>
-              <dd className="truncate font-mono text-xs">{value}</dd>
+              <dd className="truncate font-mono text-caption text-foreground">{value}</dd>
             </div>
           ))}
         </dl>
-        <JsonView label="Checkpoint" value={checkpoint} />
-        <JsonView label="Run input" value={detail.input} />
-        <JsonView label="Run output" value={detail.output} />
-        <JsonView label="Everything (raw read model)" value={detail} />
+        <div className="space-y-1">
+          <JsonView label="Checkpoint" value={checkpoint} />
+          <JsonView label="Run input" value={detail.input} />
+          <JsonView label="Run output" value={detail.output} />
+          <JsonView label="Everything (raw read model)" value={detail} />
+        </div>
       </div>
     </details>
   );

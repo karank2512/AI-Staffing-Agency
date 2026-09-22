@@ -1,4 +1,5 @@
 import { AppError, errorMessage, isAppError } from "@/server/errors";
+import { assertOrgActive, assertWithinBudget, redactAndClip } from "@/server/security";
 import { buildRequestTrace, buildResponseTrace, recordModelCall, type RequestTrace, type ResponseTrace } from "./persist";
 import { computeCostUsd, priceFor } from "./pricing";
 import { createAiSdkProvider } from "./providers/ai-sdk";
@@ -33,6 +34,9 @@ const PROVIDERS: Readonly<Record<ProviderId, ModelProvider>> = {
 
 const NO_USAGE: ModelUsage = { inputTokens: 0, outputTokens: 0 };
 
+/** Provider detail kept for operators (ModelCall.error, AppError.details) — never shown to a tenant. */
+const MAX_PROVIDER_DETAIL_CHARS = 500;
+
 /** Failed structured-output attempts still consumed tokens; repair.ts passes them along in AppError.details. */
 function failureDetails(e: unknown): { usage: ModelUsage; text?: string } {
   const details = isAppError(e) ? (e.details as { usage?: Partial<ModelUsage>; text?: unknown } | undefined) : undefined;
@@ -46,6 +50,11 @@ function failureDetails(e: unknown): { usage: ModelUsage; text?: string } {
   };
 }
 
+/**
+ * Provider SDK errors carry request ids, URLs, sometimes an echoed prompt fragment and even the API key
+ * ("Incorrect API key provided: sk-…"). That text is for operators, so it goes to `details` and to the
+ * ModelCall.error column (scrubbed); the AppError MESSAGE — which reaches tenants — stays generic (F-009).
+ */
 function toAppError(e: unknown, route: TierRoute): AppError {
   if (isAppError(e)) return e;
   if (route.provider === "mock") {
@@ -53,11 +62,30 @@ function toAppError(e: unknown, route: TierRoute): AppError {
     return new AppError("INTERNAL", `Simulated model call failed: ${errorMessage(e)}`);
   }
   const statusCode = (e as { statusCode?: unknown } | null)?.statusCode;
-  return new AppError("MODEL_ERROR", `${providerLabel(route.provider)} could not complete the request: ${errorMessage(e)}`, {
+  const status = typeof statusCode === "number" ? `HTTP ${statusCode}` : "no response";
+  return new AppError("MODEL_ERROR", `${providerLabel(route.provider)} could not complete the request (${status})`, {
     provider: route.provider,
     model: route.model,
     ...(typeof statusCode === "number" ? { statusCode } : {}),
+    providerMessage: redactAndClip(errorMessage(e), MAX_PROVIDER_DETAIL_CHARS),
   });
+}
+
+/** What lands in ModelCall.error: the generic line plus the scrubbed provider detail, for operators. */
+function errorForTrace(failure: AppError, raw: unknown): string {
+  const detail = redactAndClip(errorMessage(raw), MAX_PROVIDER_DETAIL_CHARS);
+  return detail && detail !== failure.message ? `${failure.message} — ${detail}` : failure.message;
+}
+
+/**
+ * Backstop for money and for the operator kill switch (F-004): the actions that spend already check these,
+ * but every LIVE call passes through here, so a path that forgot to check cannot spend anyway. Simulated
+ * calls cost nothing and are never blocked, which keeps the whole product usable without API keys.
+ */
+async function assertMaySpend(tracking: CallTracking, simulated: boolean): Promise<void> {
+  if (simulated || !tracking.organizationId) return;
+  await assertOrgActive(tracking.organizationId);
+  await assertWithinBudget(tracking.organizationId);
 }
 
 /**
@@ -75,6 +103,7 @@ async function execute<R extends { usage: ModelUsage }>(args: {
   const route = routeTier(tier);
   const simulated = route.provider === "mock";
   const price = priceFor(route.provider, route.model, tier);
+  await assertMaySpend(tracking, simulated);
   const startedAt = Date.now();
   const base = { tracking, provider: route.provider, model: route.model, tier, simulated, request: args.request };
 
@@ -90,7 +119,7 @@ async function execute<R extends { usage: ModelUsage }>(args: {
       costUsd: computeCostUsd(price, usage.inputTokens, usage.outputTokens),
       latencyMs: Date.now() - startedAt,
       response: text !== undefined ? buildResponseTrace({ text }) : undefined,
-      error: failure.message,
+      error: errorForTrace(failure, e),
     });
     throw failure;
   }

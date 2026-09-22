@@ -1,4 +1,5 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import type { EvaluationDetails } from "@/server/domain/evaluation";
@@ -22,6 +23,7 @@ export interface DeliverableFeedbackArgs {
 const MAX_FEEDBACK_CHARS = 4_000;
 
 export async function recordDeliverableFeedback(s: SessionContext, args: DeliverableFeedbackArgs): Promise<void> {
+  assertCan(s, "deliverables.review");
   if (args.decision !== "accept" && args.decision !== "reject") throw invalid("Decision must be accept or reject");
   const feedback = args.feedback?.trim() || undefined;
   if (feedback && feedback.length > MAX_FEEDBACK_CHARS) {

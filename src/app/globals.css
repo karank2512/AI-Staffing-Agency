@@ -3,136 +3,541 @@
 @import "shadcn/tailwind.css";
 
 /*
+ * Design system — "Quiet confidence" (docs/DESIGN.md).
+ *
  * Light theme only. The `dark` variant stays class-scoped (and `.dark` is never set) so the `dark:` classes inside
  * the shadcn primitives can never activate from the OS colour scheme.
  */
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  /* Fonts: the system stack serves the OS UI font on Apple devices; Inter (next/font, --font-inter) is the
+     non-Apple fallback. No third-party font files ship with the app.
+     `var(--font-inter, "Inter")` MUST keep its fallback: an unresolved var() makes the whole font-family
+     invalid at computed-value time, and the page silently renders in the browser's default serif. The
+     fallback matters for any tree rendered outside the root <html> (global-error.tsx). */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", var(--font-inter, "Inter"), "Helvetica Neue", Helvetica,
+    Arial, sans-serif;
+  --font-display:
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", var(--font-inter, "Inter"), "Helvetica Neue", Helvetica,
+    Arial, sans-serif;
+  --font-heading: var(--font-display);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --font-heading: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
-  --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
-  --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-secondary: var(--secondary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-hover: var(--secondary-hover);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-hairline: var(--hairline);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-link: var(--link);
+  --color-tertiary: var(--text-tertiary);
+  --color-canvas: var(--surface-secondary);
+  --color-canvas-raised: var(--surface-tertiary);
+  --color-ink: var(--surface-ink);
+  --color-ink-foreground: var(--surface-ink-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-axis: var(--chart-axis);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Radii are explicit, not multiplier-derived, so each maps to a deliberate role. */
+  --radius-xs: 6px; /* checkbox, kbd */
+  --radius-sm: 8px; /* menu items, small chips, tooltips */
+  --radius-md: 10px; /* segmented-control thumb, inline code */
+  --radius-lg: 12px; /* inputs, inset panels, code blocks */
+  --radius-xl: 18px; /* cards: the default surface */
+  --radius-2xl: 22px; /* dialogs, popovers of substance */
+  --radius-3xl: 28px; /* marketing tiles, showcase frames */
+  --radius-4xl: 36px; /* hero showcase frame */
+
+  --shadow-card: var(--elev-1);
+  --shadow-card-hover: var(--elev-2);
+  --shadow-popover: var(--elev-3);
+  --shadow-bar: var(--elev-bar);
+  --shadow-thumb: var(--elev-thumb);
+
+  --ease-out: var(--motion-ease-out);
+  --ease-standard: var(--motion-ease-standard);
+  --ease-in-out: var(--motion-ease-in-out);
+
+  --container-app: 1200px;
+  --container-marketing: 1024px;
+  --container-text: 692px;
+  --container-reading: 720px;
 }
 
-/*
- * Visual language: neutral slate base, ONE brand accent (deep indigo-violet) reserved for primary actions, focus
- * rings and active navigation. Status colours are NOT tokens — use the Tailwind palette by convention
- * (emerald = success, amber = attention, rose = failure, sky = running, slate = idle); see src/components/README.md.
- */
 :root {
-  --background: oklch(0.988 0.002 247.84);
-  --foreground: oklch(0.208 0.042 265.75);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.208 0.042 265.75);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.208 0.042 265.75);
-  --primary: oklch(0.476 0.226 279.5);
-  --primary-foreground: oklch(0.985 0.004 280);
-  --secondary: oklch(0.968 0.007 247.9);
-  --secondary-foreground: oklch(0.279 0.041 260.03);
-  --muted: oklch(0.968 0.007 247.9);
-  --muted-foreground: oklch(0.52 0.042 257.4);
-  --accent: oklch(0.962 0.009 255);
-  --accent-foreground: oklch(0.208 0.042 265.75);
-  --destructive: oklch(0.586 0.253 17.585);
-  --border: oklch(0.929 0.013 255.5);
-  --input: oklch(0.905 0.017 255);
-  --ring: oklch(0.585 0.2 279);
-  /* Charts: brand first, then the status hues so series read consistently with badges. */
-  --chart-1: oklch(0.511 0.23 279);
-  --chart-2: oklch(0.685 0.169 237.32);
-  --chart-3: oklch(0.696 0.17 162.48);
-  --chart-4: oklch(0.769 0.188 70.08);
-  --chart-5: oklch(0.645 0.246 16.44);
-  --radius: 0.5rem;
-  --sidebar: oklch(0.978 0.004 247.86);
-  --sidebar-foreground: oklch(0.372 0.044 257.29);
-  --sidebar-primary: oklch(0.476 0.226 279.5);
-  --sidebar-primary-foreground: oklch(0.985 0.004 280);
-  --sidebar-accent: oklch(0.945 0.01 255);
-  --sidebar-accent-foreground: oklch(0.208 0.042 265.75);
-  --sidebar-border: oklch(0.929 0.013 255.5);
-  --sidebar-ring: oklch(0.585 0.2 279);
+  /* Surfaces */
+  --background: #ffffff; /* default page (marketing, auth, reading view) */
+  --foreground: #1d1d1f; /* primary text (16.1:1 on white) */
+  --surface-secondary: #f5f5f7; /* app canvas + alternating marketing sections */
+  --surface-tertiary: #fbfbfd; /* nav base tint, subtle raised areas */
+  --surface-ink: #000000; /* the single dark showcase band on marketing */
+  --surface-ink-foreground: #f5f5f7;
+  --card: #ffffff;
+  --card-foreground: #1d1d1f;
+  --popover: #ffffff; /* solid fallback; frosted via .material-thick */
+  --popover-foreground: #1d1d1f;
+
+  /* Text roles */
+  --muted-foreground: #6e6e73; /* secondary text: 5.0:1 on white, 4.6:1 on #f5f5f7 */
+  --text-tertiary: #86868b; /* ONLY for >=18px text, placeholders, disabled or decorative numerals */
+  --link: #0066cc; /* inline text links: 5.6:1 */
+
+  /* Accent: the only brand colour */
+  --primary: #0071e3;
+  --primary-foreground: #ffffff;
+  --primary-hover: #0077ed;
+  --primary-active: #006edb;
+  --ring: #0071e3;
+
+  /* Neutrals for fills */
+  --secondary: #e8e8ed; /* gray pill button, segmented track */
+  --secondary-foreground: #1d1d1f;
+  --secondary-hover: #dcdce1;
+  --muted: #f5f5f7; /* inset panels, table hover, skeleton base */
+  --accent: #f0f0f3; /* menu item hover / highlighted row */
+  --accent-foreground: #1d1d1f;
+
+  /* Lines */
+  --border: #e5e5ea; /* row dividers, separators */
+  --hairline: rgb(0 0 0 / 0.08); /* frosted-bar bottom edge, card edge on white */
+  --input: #d2d2d7; /* input borders */
+
+  /* Status: text-safe foregrounds + whisper-soft fills */
+  --success: #248a3d;
+  --success-soft: #eaf6ec;
+  --warning: #b25000; /* "waiting on you" */
+  --warning-soft: #fff4e5;
+  --danger: #d70015;
+  --danger-soft: #fff0f1;
+  --info: #0071e3; /* running / in progress */
+  --info-soft: #eaf3fd;
+  --neutral: #6e6e73;
+  --destructive: #d70015;
+
+  /* Charts: accent first, then status hues; neutral gray for "other". */
+  --chart-1: #0071e3;
+  --chart-2: #6e6e73;
+  --chart-3: #248a3d;
+  --chart-4: #c75d00;
+  --chart-5: #d70015;
+  --chart-grid: #ececf0;
+  --chart-axis: #86868b;
+
+  /* Radius base (kept for shadcn internals that reference --radius) */
+  --radius: 12px;
+
+  /* The "sidebar" tokens now style the global nav, mobile menu and Sheet. */
+  --sidebar: rgb(251 251 253 / 0.8);
+  --sidebar-foreground: #1d1d1f;
+  --sidebar-primary: #0071e3;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgb(0 0 0 / 0.05);
+  --sidebar-accent-foreground: #1d1d1f;
+  --sidebar-border: rgb(0 0 0 / 0.08);
+  --sidebar-ring: #0071e3;
+
+  /* Materials (frosted chrome) */
+  --material-nav: rgb(251 251 253 / 0.8);
+  --material-nav-dark: rgb(22 22 23 / 0.8); /* nav while over the ink band */
+  --material-thick: rgb(255 255 255 / 0.82); /* menus, popovers, sticky action bars */
+  --material-thin: rgb(255 255 255 / 0.6);
+  --blur-material: saturate(180%) blur(20px);
+  --blur-overlay: blur(6px);
+  --overlay: rgb(0 0 0 / 0.32);
+
+  /* Elevation: soft, wide, low-alpha */
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.04), 0 4px 16px rgb(0 0 0 / 0.04);
+  --elev-2: 0 2px 4px rgb(0 0 0 / 0.04), 0 12px 32px rgb(0 0 0 / 0.08);
+  --elev-3: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 8px 30px rgb(0 0 0 / 0.12);
+  --elev-bar: 0 -0.5px 0 rgb(0 0 0 / 0.08);
+  --elev-thumb: 0 1px 3px rgb(0 0 0 / 0.12), 0 0 0 0.5px rgb(0 0 0 / 0.04);
+
+  /* Focus */
+  --focus-ring: 0 0 0 4px rgb(0 113 227 / 0.28);
+
+  /* Motion */
+  --motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-ease-standard: cubic-bezier(0.4, 0, 0.6, 1);
+  --motion-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-instant: 120ms;
+  --duration-fast: 200ms;
+  --duration-base: 280ms;
+  --duration-slow: 400ms;
+  --reveal-distance: 16px;
+
+  /* Layout & spacing */
+  --nav-height: 48px;
+  --localnav-height: 52px;
+  --gutter: 16px;
+  --gutter-lg: 24px;
+  --space-section-app: 56px;
+  --space-section-marketing: clamp(88px, 11vw, 160px);
+  --space-card: 24px;
+  --space-card-sm: 20px;
+  --space-stack: 16px;
 }
 
-/* Small, shared text roles so every page labels things the same way. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+    --reveal-distance: 0px;
+  }
+}
+
+/* ── Materials (frosted chrome) ──────────────────────────────────────────── */
+
+@utility material-nav {
+  background-color: var(--material-nav);
+  -webkit-backdrop-filter: var(--blur-material);
+  backdrop-filter: var(--blur-material);
+  box-shadow: inset 0 -0.5px 0 var(--hairline);
+}
+
+@utility material-thick {
+  background-color: var(--material-thick);
+  -webkit-backdrop-filter: var(--blur-material);
+  backdrop-filter: var(--blur-material);
+}
+
+/* Browsers without backdrop-filter get an opaque surface so text stays legible. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .material-nav {
+    background-color: #fbfbfd;
+  }
+  .material-thick {
+    background-color: #ffffff;
+  }
+}
+
+/* ── Type scale ──────────────────────────────────────────────────────────────
+ * One utility per role so pages never hand-roll sizes. Sizes interpolate between the mobile and desktop values
+ * from docs/DESIGN.md across a 375px…1024px viewport; weights are only 400/500/600.
+ */
+
+@utility text-display-xl {
+  font-family: var(--font-display);
+  font-size: clamp(3rem, 1.844rem + 4.93vw, 5rem);
+  line-height: 1.06;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+@utility text-display {
+  font-family: var(--font-display);
+  font-size: clamp(2.5rem, 1.922rem + 2.47vw, 3.5rem);
+  line-height: 1.08;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+@utility text-headline {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 1.711rem + 1.23vw, 2.5rem);
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+@utility text-title-1 {
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 1.606rem + 0.62vw, 2rem);
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+@utility text-title-2 {
+  font-size: clamp(1.3125rem, 1.276rem + 0.15vw, 1.375rem);
+  line-height: 1.27;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+@utility text-title-3 {
+  font-size: 1.0625rem;
+  line-height: 1.294;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+}
+
+@utility text-body-lg {
+  font-size: clamp(1.1875rem, 1.115rem + 0.31vw, 1.3125rem);
+  line-height: 1.4;
+  font-weight: 400;
+  letter-spacing: 0.004em;
+}
+
+@utility text-body {
+  font-size: 1.0625rem;
+  line-height: 1.47;
+  font-weight: 400;
+  letter-spacing: -0.022em;
+}
+
+@utility text-body-app {
+  font-size: 0.9375rem;
+  line-height: 1.467;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+@utility text-callout {
+  font-size: 0.875rem;
+  line-height: 1.43;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+}
+
+@utility text-footnote {
+  font-size: 0.8125rem;
+  line-height: 1.385;
+  font-weight: 400;
+  letter-spacing: -0.006em;
+}
+
+@utility text-caption {
+  font-size: 0.75rem;
+  line-height: 1.333;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+@utility text-metric-xl {
+  font-family: var(--font-display);
+  font-size: clamp(2.5rem, 2.211rem + 1.23vw, 3rem);
+  line-height: 1.09;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+@utility text-metric {
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 1.533rem + 0.92vw, 2.125rem);
+  line-height: 1.18;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sentence-case section label — never uppercase, never tracked out. */
 @utility eyebrow {
-  font-size: 0.6875rem;
-  line-height: 1rem;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.8125rem;
+  line-height: 1.385;
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--muted-foreground);
 }
 
-/* Numbers that sit in columns or change over time: fixed-width digits so they do not jitter. */
+/* Numbers that sit in columns or change over time: fixed-width digits so they never jitter. */
 @utility metric {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
 
+/* ── Motion ──────────────────────────────────────────────────────────────── */
+
+/* Scroll reveal (marketing only). The hidden initial state applies only where scripting can flip it, so
+   crawlers, thumbnails and no-JS visitors always see the content. */
+@media (scripting: enabled) {
+  [data-reveal] {
+    opacity: 0;
+    transform: translateY(var(--reveal-distance));
+    transition:
+      opacity var(--duration-slow) var(--motion-ease-out),
+      transform var(--duration-slow) var(--motion-ease-out);
+    transition-delay: calc(var(--i, 0) * 60ms);
+  }
+  [data-reveal][data-revealed] {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The only infinite animation in the product: a run that is in flight right now. */
+@utility live-dot {
+  position: relative;
+  display: inline-flex;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background-color: var(--info);
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background-color: var(--info);
+    animation: live-pulse 1.6s var(--motion-ease-out) infinite;
+  }
+}
+
+@keyframes live-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(333%);
+  }
+}
+
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
+
   html {
-    @apply font-sans;
+    font-family: var(--font-sans);
     color-scheme: light;
     -webkit-text-size-adjust: 100%;
   }
-  body {
-    /* 14px base UI text; headings and metrics opt up explicitly. */
-    @apply bg-background font-sans text-sm leading-normal text-foreground antialiased;
-    text-rendering: optimizeLegibility;
+
+  @media (prefers-reduced-motion: no-preference) {
+    html {
+      scroll-behavior: smooth;
+    }
   }
-  button:not(:disabled), [role="button"]:not(:disabled) {
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-size: 17px;
+    line-height: 1.47059;
+    letter-spacing: -0.022em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "kern";
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* One blue halo for everything that does not ring itself. A box-shadow follows the element's own radius, so
+     the ring hugs pills, cards and inputs without touching their shape. Components that already carry a
+     box-shadow utility (which would replace this one) add `focus-visible:ring-4 focus-visible:ring-primary/30`
+     instead, because Tailwind's ring and shadow compose. */
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+
+  ::selection {
+    background-color: rgb(0 113 227 / 0.18);
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .prose-link,
+  main p a:not([data-slot]) {
+    color: var(--link);
+  }
+  .prose-link:hover,
+  main p a:not([data-slot]):hover {
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
     cursor: pointer;
   }
-  ::selection {
-    /* Literal alpha colour (= --primary at 16%): color-mix() would fall back to the solid brand colour in older browsers. */
-    background-color: oklch(0.476 0.226 279.5 / 16%);
-  }
-  /* Quiet scrollbars inside panels (tables, code blocks, sheets); the page scrollbar stays native. */
+
+  /* Quiet scrollbars inside panels; the page scrollbar stays native. */
   body * {
     scrollbar-width: thin;
-    scrollbar-color: oklch(0.869 0.022 252.9) transparent;
+    scrollbar-color: #d2d2d7 transparent;
+  }
+
+  /* In-page anchors clear the frosted chrome. */
+  [id] {
+    scroll-margin-top: calc(var(--nav-height) + 16px);
+  }
+}
+
+/* Safety net: whatever a component animates, honour the OS setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

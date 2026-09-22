@@ -1,61 +1,97 @@
 "use client";
 
-import type { ReactNode } from "react";
-import { Clock, Coins, Hash, PlayCircle } from "lucide-react";
-import { RelativeTime } from "@/components/relative-time";
-import { StatCard } from "@/components/stat-card";
+import { SimulatedBadge } from "@/components/simulated-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { formatDuration, formatTokens, formatUsd } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { isTerminal, type RunLiveView } from "@/server/runtime/types";
 import { useRunLive } from "./run-live";
 
-/** The run's status badge, kept current by the live poller (pulses while RUNNING via StatusBadge). */
-export function LiveRunStatus({ className }: { className?: string }) {
-  const { live } = useRunLive();
-  return <StatusBadge kind="run" status={live.run.status} className={className} />;
-}
-
 /**
- * Headline for the "Active time" tile. Before the run finishes, durationMs is the executor's running total (see
- * `activeTimeMs` in the runs query), so it is marked "so far"; a run that hasn't done any work yet has none.
+ * The live parts of the run header: one status, then quiet facts. Everything here is driven by the poller in
+ * `run-live.tsx`, so the numbers tick up while the run is in flight without the page moving.
  */
-function activeTimeValue(run: RunLiveView["run"]): ReactNode {
-  if (run.durationMs === null) return run.status === "RUNNING" ? "In progress" : "—";
+
+/** Active time to show. Before the run finishes this is the executor's running total, so it says "so far". */
+function activeTime(run: RunLiveView["run"]): string {
+  if (run.durationMs === null) return run.status === "RUNNING" ? "just started" : "—";
   if (isTerminal(run.status)) return formatDuration(run.durationMs);
-  return (
-    <>
-      {formatDuration(run.durationMs)} <span className="text-sm font-normal text-muted-foreground">so far</span>
-    </>
-  );
+  return `${formatDuration(run.durationMs)} so far`;
 }
 
-/** Started / duration / cost / tokens tiles. Values tick up while the run is in flight. */
-export function LiveRunStats() {
+export function RunMetaLine({ className }: { className?: string }) {
   const { live } = useRunLive();
   const { run } = live;
-  const inFlight = run.status === "RUNNING";
   const tokens = run.inputTokens + run.outputTokens;
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatCard
-        label="Started"
-        icon={PlayCircle}
-        value={run.startedAt ? <RelativeTime iso={run.startedAt} /> : "Not yet"}
-        hint={run.finishedAt ? <>Finished <RelativeTime iso={run.finishedAt} /></> : run.status === "QUEUED" ? "Waiting in the queue" : run.status === "WAITING_FOR_APPROVAL" ? "Paused for your approval" : inFlight ? "Working right now" : undefined}
-      />
-      <StatCard
-        label="Active time"
-        icon={Clock}
-        value={activeTimeValue(run)}
-        hint="Excludes time spent waiting for approvals"
-      />
-      <StatCard label="Cost" icon={Coins} value={formatUsd(run.costUsd)} hint={run.simulated ? "Estimated at reference model prices" : "Model and tool usage"} />
-      <StatCard
-        label="Tokens"
-        icon={Hash}
-        value={formatTokens(tokens)}
-        hint={`${formatTokens(run.inputTokens)} in · ${formatTokens(run.outputTokens)} out`}
+    <span className={cn("flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-footnote text-muted-foreground", className)}>
+      <StatusBadge kind="run" status={run.status} />
+      <span aria-hidden="true">·</span>
+      <span className="metric">{activeTime(run)}</span>
+      <span aria-hidden="true">·</span>
+      <span className="metric">{formatUsd(run.costUsd)}</span>
+      {tokens > 0 ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="metric">{formatTokens(tokens)} tokens</span>
+        </>
+      ) : null}
+      {run.attempt > 1 ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="metric">
+            attempt {run.attempt} of {run.maxAttempts}
+          </span>
+        </>
+      ) : null}
+      {run.simulated ? <SimulatedBadge /> : null}
+    </span>
+  );
+}
+
+/** What the worker is doing right now, as one sentence — only while the run hasn't finished. */
+export function RunProgressLine({ workerName }: { workerName: string }) {
+  const { live } = useRunLive();
+  const { run, steps } = live;
+  if (isTerminal(run.status) && !live.evaluationPending) return null;
+
+  const done = steps.filter((s) => s.status === "SUCCEEDED" || s.status === "SKIPPED" || s.status === "FAILED").length;
+  const current = steps.find((s) => s.status === "RUNNING" || s.status === "WAITING");
+
+  const sentence =
+    run.status === "QUEUED"
+      ? `${workerName} is waiting for a free slot.`
+      : run.status === "WAITING_FOR_APPROVAL"
+        ? `${workerName} is waiting for your decision.`
+        : live.evaluationPending
+          ? "Checking the deliverable against the job’s criteria."
+          : current
+            ? `Working — step ${done + 1} of about ${Math.max(steps.length + 1, done + 2)}.`
+            : `${workerName} is getting started.`;
+
+  return <span className="block text-footnote text-muted-foreground">{sentence}</span>;
+}
+
+/**
+ * A 2px accent rail pinned under the global nav while the run is moving. It advances on real progress (steps
+ * closed out of the steps seen so far), never on a timer, and disappears the moment the run is done.
+ */
+export function RunProgressRail() {
+  const { live } = useRunLive();
+  const { run, steps } = live;
+  const active = !isTerminal(run.status);
+  if (!active) return null;
+
+  const done = steps.filter((s) => s.status === "SUCCEEDED" || s.status === "SKIPPED").length;
+  const estimate = Math.max(steps.length + 1, 4);
+  const pct = run.status === "QUEUED" ? 4 : Math.min(92, Math.round((done / estimate) * 100) + 6);
+
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-(--nav-height) z-40 h-0.5" aria-hidden="true">
+      <div
+        className="h-full bg-primary transition-[width] duration-[400ms] ease-out"
+        style={{ width: `${pct}%` }}
       />
     </div>
   );

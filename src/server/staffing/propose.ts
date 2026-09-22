@@ -1,8 +1,10 @@
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import { BlueprintDraftSchema, type BlueprintDraft, type JobSpec, type WorkerBlueprint, type WorkerProposal } from "@/server/domain";
 import { conflict, errorMessage, isAppError } from "@/server/errors";
 import { llm } from "@/server/models";
+import { assertOrgActive, assertWithinBudget } from "@/server/security";
 import { designBlueprint } from "./design";
 import { getJob, latestOpenSpec, parseProposal, parseStoredSpec } from "./jobs";
 import { normalizeBlueprintDraft } from "./normalize";
@@ -33,6 +35,9 @@ function designWithFallback(spec: JobSpec, draft: BlueprintDraft, usedNames: str
 }
 
 export async function proposeWorker(s: SessionContext, jobId: string, opts: { regenerate?: boolean } = {}): Promise<WorkerProposal> {
+  assertCan(s, "jobs.manage");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const job = await getJob(s.organizationId, jobId);
   if (job.status !== "DRAFT" && job.status !== "SPEC_APPROVED") throw conflict("This job is already staffed.");
   // Same rule as getHireFlowState: the flow is at the proposal step only when the newest open spec is the approved one.

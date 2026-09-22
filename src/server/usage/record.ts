@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { config } from "@/server/config";
-import { db } from "@/server/db";
+import { db, type DbOrTx } from "@/server/db";
 import { errorMessage } from "@/server/errors";
+import { recordRealSpend } from "@/server/security";
 
 export interface RecordUsageInput {
   organizationId: string;
@@ -34,9 +35,13 @@ function toCost(n: number): Prisma.Decimal {
  * Append one row to the metering ledger and — when the call belongs to a run — roll it up onto the Run.
  *
  * NEVER throws: metering must not be able to fail a model/tool call that already happened.
- * The ledger row and the Run rollup are written in one transaction so they cannot drift apart, and the rollup
- * uses SQL-level increments (this function is the ONLY writer of Run.costUsd/inputTokens/outputTokens), so
- * concurrent calls for the same run never lose an update. A missing run is tolerated (updateMany → count 0).
+ * The ledger row, the Run rollup and (for REAL spend) the org's month-to-date counter are written in one
+ * transaction so they cannot drift apart, and both rollups use SQL-level increments (this function is the ONLY
+ * writer of Run.costUsd/inputTokens/outputTokens), so concurrent calls never lose an update. A missing run is
+ * tolerated (updateMany → count 0).
+ *
+ * Simulated calls cost nothing real, so they never touch OrgSpendMonth: the monthly budget guards the operator's
+ * actual provider bill, not the priced-for-realism numbers the demo shows (audit INF-02).
  */
 export async function recordUsage(u: RecordUsageInput): Promise<void> {
   try {
@@ -58,39 +63,46 @@ export async function recordUsage(u: RecordUsageInput): Promise<void> {
       jobId ??= run?.jobId;
     }
 
-    const createRecord = db.usageRecord.create({
-      data: {
-        organizationId: u.organizationId,
-        kind: u.kind,
-        provider: u.provider,
-        resource: u.resource,
-        inputTokens,
-        outputTokens,
-        costUsd,
-        billableUsd,
-        simulated: u.simulated,
-        workerId: workerId ?? null,
-        jobId: jobId ?? null,
-        runId: u.runId ?? null,
-      },
-    });
-
-    if (!u.runId) {
-      await createRecord;
-      return;
-    }
-
-    await db.$transaction([
-      createRecord,
-      db.run.updateMany({
+    const data = {
+      organizationId: u.organizationId,
+      kind: u.kind,
+      provider: u.provider,
+      resource: u.resource,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      billableUsd,
+      simulated: u.simulated,
+      workerId: workerId ?? null,
+      jobId: jobId ?? null,
+      runId: u.runId ?? null,
+    };
+    const realSpend = !u.simulated && costUsd.greaterThan(0);
+    /** SQL-level increments, so concurrent calls for the same run never lose an update. */
+    const rollUpOntoRun = (client: DbOrTx) =>
+      client.run.updateMany({
         where: { id: u.runId, organizationId: u.organizationId },
         data: {
           costUsd: { increment: costUsd },
           inputTokens: { increment: inputTokens },
           outputTokens: { increment: outputTokens },
         },
-      }),
-    ]);
+      });
+
+    // Simulated mode is the hot path (every mock call lands here), so it stays on the cheap batch transaction;
+    // only REAL spend needs the interactive one that also increments the workspace's month-to-date total.
+    if (!realSpend) {
+      if (!u.runId) await db.usageRecord.create({ data });
+      else await db.$transaction([db.usageRecord.create({ data }), rollUpOntoRun(db)]);
+      return;
+    }
+
+    await db.$transaction(async (tx) => {
+      await tx.usageRecord.create({ data });
+      if (u.runId) await rollUpOntoRun(tx);
+      // Keeps the budget check O(1): assertWithinBudget reads one OrgSpendMonth row instead of summing a ledger.
+      await recordRealSpend(u.organizationId, costUsd.toNumber(), tx);
+    });
   } catch (e) {
     console.error(
       `[usage] failed to record ${u.kind} usage (${u.provider}/${u.resource}) for org ${u.organizationId}: ${errorMessage(e)}`,

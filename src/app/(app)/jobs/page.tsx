@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Briefcase, Plus, SearchX } from "lucide-react";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { EmptyState } from "@/components/empty-state";
+import { LiveDot } from "@/components/live-dot";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { statusLabel } from "@/lib/status";
 import { requireSession } from "@/server/auth";
 import { listJobs, parseJobStatusFilter } from "@/server/queries/jobs";
@@ -17,56 +18,53 @@ export default async function JobsPage({ searchParams }: { searchParams: Promise
   const s = await requireSession();
   const { status } = await searchParams;
   const filter = parseJobStatusFilter(status);
-  const data = await listJobs(s.organizationId, { status: filter });
+  const data = await listJobs(s.organizationId, { status: filter, role: s.role });
 
   const nothingAtAll = data.counts.all === 0;
+  const canHire = data.permissions["workers.hire"];
 
   return (
     <>
-      <PageHeader
-        title="Jobs"
-        description="Every role you've opened, who's on it, and what they've delivered."
-        actions={
-          <Button asChild>
-            <Link href="/hire">
-              <Plus aria-hidden="true" /> Hire a worker
-            </Link>
-          </Button>
-        }
-      />
+      <PageHeader title="Jobs" description="Everything you've asked for, and who's on it." />
 
-      <div className="space-y-8">
+      <div className="space-y-6">
         {nothingAtAll ? (
-          <EmptyState
-            icon={Briefcase}
-            title="Hire your first worker"
-            description="Describe a job in plain English and we'll scope it, design an AI worker for it and put them to work."
-            action={
-              <Button asChild>
-                <Link href="/hire">
-                  <Plus aria-hidden="true" /> Hire a worker
-                </Link>
-              </Button>
-            }
-          />
-        ) : (
-          <div className="space-y-4">
-            <StatusFilter active={data.filter} counts={data.counts} />
-            {data.jobs.length === 0 ? (
-              <EmptyState
-                icon={SearchX}
-                title={`No ${filter ? statusLabel("job", filter).toLowerCase() : ""} jobs`}
-                description="Nothing matches this filter right now."
-                action={
-                  <Button variant="outline" asChild>
-                    <Link href="/jobs">Show all jobs</Link>
+          <Card>
+            <EmptyState
+              title="Nothing on the books yet"
+              description="Describe a job in plain English. We'll scope it, design a worker for it, and put them on a schedule."
+              action={
+                canHire ? (
+                  <Button size="lg" asChild>
+                    <Link href="/hire">Hire your first worker</Link>
                   </Button>
-                }
-              />
+                ) : undefined
+              }
+            />
+          </Card>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-3">
+              <StatusFilter active={data.filter} counts={data.counts} />
+              {data.hasRunsInFlight ? <LiveDot className="ml-auto" /> : null}
+            </div>
+
+            {data.jobs.length === 0 ? (
+              <Card>
+                <EmptyState
+                  title={`No ${filter ? statusLabel("job", filter).toLowerCase() : ""} jobs`}
+                  description="Nothing matches this filter right now."
+                  action={
+                    <Button variant="secondary" size="lg" asChild>
+                      <Link href="/jobs">Show all jobs</Link>
+                    </Button>
+                  }
+                />
+              </Card>
             ) : (
               <JobsTable jobs={data.jobs} />
             )}
-          </div>
+          </>
         )}
       </div>
 

@@ -1,52 +1,35 @@
-import Link from "next/link";
+import { LocalNav } from "@/components/shell/local-nav";
 import { cn } from "@/lib/utils";
 import { WORKER_TAB_LABELS, WORKER_TABS, type WorkerTab } from "../_tabs/types";
 
 export interface WorkerTabNavProps {
   workerId: string;
+  /** Persona name — the chat tab reads "Talk to Alex", and the bar reveals the name on scroll. */
+  workerName: string;
   active: WorkerTab;
-  /** Small counters shown next to a label ("Deliverables 3"). */
-  counts?: Partial<Record<WorkerTab, number>>;
   className?: string;
 }
 
+/** Display labels stay in the tab nav: the ids and `WORKER_TAB_LABELS` are the frozen seam. */
+function labelFor(tab: WorkerTab, workerName: string): string {
+  return tab === "chat" ? `Talk to ${workerName}` : WORKER_TAB_LABELS[tab];
+}
+
+export function tabHref(workerId: string, tab: WorkerTab): string {
+  return tab === "overview" ? `/workers/${workerId}` : `/workers/${workerId}?tab=${tab}`;
+}
+
 /**
- * Tabs-styled navigation driven by `?tab=` so every tab is a real, shareable URL (and the browser back button
- * works). Server-rendered links — no client state to keep in sync.
+ * The profile's section bar: the shared frosted LocalNav, mounted full-bleed under the global nav. Every tab is
+ * a real URL, so the back button and shared links work; on a narrow screen the links scroll sideways.
  */
-export function WorkerTabNav({ workerId, active, counts, className }: WorkerTabNavProps) {
-  return (
-    <nav aria-label="Worker profile sections" className={cn("-mx-1 overflow-x-auto", className)}>
-      <ul role="list" className="flex min-w-max items-center gap-1 border-b border-border px-1">
-        {WORKER_TABS.map((tab) => {
-          const isActive = tab === active;
-          const count = counts?.[tab];
-          return (
-            <li key={tab}>
-              <Link
-                href={tab === "overview" ? `/workers/${workerId}` : `/workers/${workerId}?tab=${tab}`}
-                scroll={false}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "relative inline-flex h-9 items-center gap-1.5 rounded-t-md px-2.5 text-sm font-medium whitespace-nowrap transition-colors outline-none",
-                  "after:absolute after:inset-x-1 after:-bottom-px after:h-0.5 after:rounded-full after:transition-opacity",
-                  "focus-visible:ring-2 focus-visible:ring-ring/50",
-                  isActive
-                    ? "text-foreground after:bg-primary after:opacity-100"
-                    : "text-muted-foreground after:opacity-0 hover:bg-muted/60 hover:text-foreground",
-                )}
-              >
-                {WORKER_TAB_LABELS[tab]}
-                {typeof count === "number" && count > 0 ? (
-                  <span className="rounded-full bg-muted px-1.5 text-[11px] leading-4 font-medium text-muted-foreground tabular-nums">
-                    {count}
-                  </span>
-                ) : null}
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
-    </nav>
-  );
+export function WorkerTabNav({ workerId, workerName, active, className }: WorkerTabNavProps) {
+  const items = WORKER_TABS.map((tab) => ({
+    label: labelFor(tab, workerName),
+    href: tabHref(workerId, tab),
+    active: tab === active,
+  }));
+
+  // The page column is 1200px wide; the bar itself spans the window, like the global nav above it.
+  return <LocalNav title={workerName} items={items} className={cn("ml-[calc(50%-50vw)] w-dvw", className)} />;
 }

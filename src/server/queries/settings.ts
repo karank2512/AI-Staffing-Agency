@@ -1,8 +1,10 @@
+import type { UserRole } from "@prisma/client";
 import { config } from "@/server/config";
 import { db } from "@/server/db";
 import { llm } from "@/server/models";
 import { KNOWN_CREDENTIALS, listCredentials } from "@/server/secrets";
 import { tools } from "@/server/tools";
+import { permissionSubset, SETTINGS_PERMISSION_KEYS, type SettingsPermissions } from "./permissions";
 
 export interface SettingsWorkspace {
   organizationName: string;
@@ -17,7 +19,7 @@ export interface SettingsProvider {
   id: string;
   label: string;
   available: boolean;
-  /** null for the built-in simulator. */
+  /** null for the built-in simulator, and for everyone but the owner (see `operator`). */
   envVar: string | null;
 }
 
@@ -27,8 +29,8 @@ export interface SettingsTierRoute {
   providerLabel: string;
   model: string;
   simulated: boolean;
-  /** Env var that can override this tier's route. */
-  overrideEnvVar: string;
+  /** Env var that can override this tier's route; null for everyone but the owner (see `operator`). */
+  overrideEnvVar: string | null;
 }
 
 export interface SettingsProviders {
@@ -65,8 +67,13 @@ export interface SettingsPageData {
   workspace: SettingsWorkspace;
   providers: SettingsProviders;
   credentials: SettingsCredential[];
-  executor: SettingsExecutor;
-  billing: { marginMultiplier: number };
+  /**
+   * Platform-operator configuration: executor tuning, the billing markup and the env var names behind the
+   * providers. Commercially sensitive and useless to a tenant, so it is OMITTED (null) for anyone below OWNER
+   * (audit INF-19). Callers pass `session.role`; without one, nobody sees it.
+   */
+  operator: { executor: SettingsExecutor; billing: { marginMultiplier: number } } | null;
+  permissions: SettingsPermissions;
 }
 
 const TIER_OVERRIDE_ENV: Record<SettingsTierRoute["tier"], string> = {
@@ -83,7 +90,9 @@ function envHasValue(name: string): boolean {
   return value !== undefined && value.trim() !== "";
 }
 
-export async function getSettingsPage(organizationId: string): Promise<SettingsPageData> {
+export async function getSettingsPage(organizationId: string, opts: { role?: UserRole } = {}): Promise<SettingsPageData> {
+  const permissions = permissionSubset(opts.role, SETTINGS_PERMISSION_KEYS);
+  const isOperator = permissions["org.manage"];
   const [organization, members, stored] = await Promise.all([
     db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { name: true, slug: true, createdAt: true } }),
     db.user.findMany({ where: { organizationId }, select: { id: true, name: true, email: true, role: true }, orderBy: { createdAt: "asc" } }),
@@ -108,7 +117,7 @@ export async function getSettingsPage(organizationId: string): Promise<SettingsP
     providers: {
       mode: status.mode,
       forceSimulated: config.forceSimulated,
-      providers: status.providers.map((p) => ({ id: p.id, label: p.label, available: p.available, envVar: p.envVar })),
+      providers: status.providers.map((p) => ({ id: p.id, label: p.label, available: p.available, envVar: isOperator ? p.envVar : null })),
       tiers: (Object.keys(TIER_OVERRIDE_ENV) as SettingsTierRoute["tier"][]).map((tier) => {
         const route = status.tiers[tier];
         return {
@@ -117,7 +126,7 @@ export async function getSettingsPage(organizationId: string): Promise<SettingsP
           providerLabel: providerLabels.get(route.provider) ?? route.provider,
           model: route.model,
           simulated: route.provider === "mock",
-          overrideEnvVar: TIER_OVERRIDE_ENV[tier],
+          overrideEnvVar: isOperator ? TIER_OVERRIDE_ENV[tier] : null,
         };
       }),
     },
@@ -134,13 +143,18 @@ export async function getSettingsPage(organizationId: string): Promise<SettingsP
         stored: row ? { last4: row.last4, label: row.label, setAt: row.createdAt, lastUsedAt: row.lastUsedAt } : null,
       };
     }),
-    executor: {
-      enabled: !config.executor.disabled,
-      pollMs: config.executor.pollMs,
-      concurrency: config.executor.concurrency,
-      staleLockMs: config.executor.staleLockMs,
-      schedulerTickMs: config.executor.schedulerTickMs,
-    },
-    billing: { marginMultiplier: config.usage.marginMultiplier },
+    operator: isOperator
+      ? {
+          executor: {
+            enabled: !config.executor.disabled,
+            pollMs: config.executor.pollMs,
+            concurrency: config.executor.concurrency,
+            staleLockMs: config.executor.staleLockMs,
+            schedulerTickMs: config.executor.schedulerTickMs,
+          },
+          billing: { marginMultiplier: config.usage.marginMultiplier },
+        }
+      : null,
+    permissions,
   };
 }

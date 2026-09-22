@@ -1,11 +1,15 @@
 import { db } from "@/server/db";
 import type { RunLimits } from "@/server/domain/blueprint";
+import { clampRunLimits } from "@/server/security";
 import { RunFailure } from "./failure";
 
 /**
  * Run limits are checked against the truth, not the executor's memory: cost from Run.costUsd (written only by
  * usage.recordUsage), tool calls from ToolCall rows of the current attempt, and duration from the accumulated
  * active time — approval waits and retry backoff never count.
+ *
+ * The blueprint's own limits are clamped to the platform ceilings here as well as at design time (audit INF-04):
+ * the runtime is the real enforcement point, whatever an older stored blueprint says.
  */
 
 export interface LimitCheckArgs {
@@ -20,7 +24,7 @@ export interface LimitCheckArgs {
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
 export async function enforceLimits(args: LimitCheckArgs): Promise<void> {
-  const { limits } = args;
+  const limits = clampRunLimits(args.limits);
   const maxMs = limits.maxRunDurationSec * 1000;
   if (args.activeMs > maxMs) {
     throw new RunFailure(

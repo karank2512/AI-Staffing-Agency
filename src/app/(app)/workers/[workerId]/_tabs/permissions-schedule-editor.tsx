@@ -2,7 +2,6 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { CalendarClock, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -12,10 +11,10 @@ import { describeCadence, type Cadence } from "@/server/domain";
 import { updateScheduleAction } from "../manage-actions";
 
 const KIND_OPTIONS: Array<{ value: Cadence["kind"]; label: string }> = [
-  { value: "manual", label: "On demand" },
+  { value: "manual", label: "Only when I ask" },
   { value: "hourly", label: "Every hour" },
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
+  { value: "daily", label: "Every day" },
+  { value: "weekly", label: "Every week" },
 ];
 
 const DAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
@@ -43,9 +42,19 @@ export interface PermissionsScheduleEditorProps {
   scheduleLabel: string;
   nextRunAt: string | null;
   status: "ACTIVE" | "PAUSED" | "RETIRED";
+  /** The viewer's role can't change the schedule; the server enforces the same rule. */
+  readOnly?: boolean;
 }
 
-export function PermissionsScheduleEditor({ workerId, workerName, schedule, scheduleLabel, nextRunAt, status }: PermissionsScheduleEditorProps) {
+export function PermissionsScheduleEditor({
+  workerId,
+  workerName,
+  schedule,
+  scheduleLabel,
+  nextRunAt,
+  status,
+  readOnly = false,
+}: PermissionsScheduleEditorProps) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [kind, setKind] = useState<Cadence["kind"]>(schedule.kind);
@@ -54,7 +63,7 @@ export function PermissionsScheduleEditor({ workerId, workerName, schedule, sche
 
   const draft = normalize(kind, hour, dayOfWeek);
   const dirty = !sameCadence(draft, schedule);
-  const readOnly = status === "RETIRED";
+  const locked = readOnly || status === "RETIRED";
 
   function save() {
     startTransition(async () => {
@@ -69,31 +78,34 @@ export function PermissionsScheduleEditor({ workerId, workerName, schedule, sche
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3">
-        <CalendarClock className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <div className="min-w-0 text-sm">
-          <p className="font-medium">{scheduleLabel}</p>
-          <p className="text-xs text-muted-foreground">
-            {status === "ACTIVE" && nextRunAt ? (
-              <>
-                Next run <RelativeTime iso={nextRunAt} />
-              </>
-            ) : status === "PAUSED" ? (
-              `${workerName} is paused — the schedule resumes when you do.`
-            ) : status === "RETIRED" ? (
-              `${workerName} is retired.`
-            ) : (
-              "Runs only when you press Run now."
-            )}
-          </p>
-        </div>
+    <div className="space-y-6">
+      <div>
+        <p className="text-title-3">{scheduleLabel}</p>
+        <p className="text-footnote mt-1 text-muted-foreground">
+          {status === "ACTIVE" && nextRunAt ? (
+            <>
+              Next run <RelativeTime iso={nextRunAt} />
+            </>
+          ) : status === "PAUSED" ? (
+            `${workerName} is paused — the schedule resumes when you do.`
+          ) : status === "RETIRED" ? (
+            `${workerName} is retired.`
+          ) : (
+            "Runs only when you press Run now."
+          )}
+        </p>
       </div>
 
-      {readOnly ? null : (
+      {locked ? (
+        <p className="text-footnote text-muted-foreground">
+          {status === "RETIRED"
+            ? "A retired worker keeps its history, but the schedule no longer changes."
+            : "Your role can see the schedule but not change it. Ask a workspace admin."}
+        </p>
+      ) : (
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="schedule-kind">Cadence</Label>
+            <Label htmlFor="schedule-kind">How often</Label>
             <Select value={kind} onValueChange={(v) => setKind(v as Cadence["kind"])} disabled={pending}>
               <SelectTrigger id="schedule-kind" className="w-full">
                 <SelectValue />
@@ -109,7 +121,7 @@ export function PermissionsScheduleEditor({ workerId, workerName, schedule, sche
           </div>
 
           {kind === "daily" || kind === "weekly" ? (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-4 sm:grid-cols-2">
               {kind === "weekly" ? (
                 <div className="space-y-1.5">
                   <Label htmlFor="schedule-day">Day</Label>
@@ -145,11 +157,12 @@ export function PermissionsScheduleEditor({ workerId, workerName, schedule, sche
             </div>
           ) : null}
 
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">{dirty ? `Will run ${describeCadence(draft).toLowerCase()}` : "No changes"}</p>
-            <Button size="sm" variant={dirty ? "default" : "outline"} disabled={!dirty || pending} onClick={save}>
-              {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
-              Save schedule
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-footnote text-muted-foreground">
+              {dirty ? `Will run ${describeCadence(draft).toLowerCase()}` : "No changes"}
+            </p>
+            <Button variant="secondary" disabled={!dirty || pending} onClick={save}>
+              {pending ? "Saving…" : "Save schedule"}
             </Button>
           </div>
         </div>

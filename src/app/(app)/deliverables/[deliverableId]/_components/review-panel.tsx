@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, PencilLine, X } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import type { DeliverableStatus } from "@prisma/client";
-import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
+import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { reviewDeliverableAction } from "../actions";
 
@@ -22,20 +23,34 @@ export interface ReviewPanelProps {
   feedback: string | null;
   reviewedByName: string | null;
   reviewedAt: string | null;
+  /** `deliverables.review` — without it the panel reads as a record, not a form. */
+  canReview?: boolean;
 }
 
 const MAX_FEEDBACK = 4_000;
 
 /**
- * Accept / Reject with optional feedback. Once decided it shows the verdict and offers "Change decision",
- * which reopens the form pre-filled with the previous feedback (the server keeps ONE review per deliverable).
+ * The reader's decision on a deliverable. It reads as a question with two answers rather than a form: on a wide
+ * screen it's a quiet card beside the article, and on a phone a bottom bar that opens a sheet. Accepting or
+ * sending back calls the same server action as before, with the same arguments.
  */
-export function ReviewPanel({ deliverableId, runId, workerId, workerName, status, feedback, reviewedByName, reviewedAt }: ReviewPanelProps) {
+export function ReviewPanel({
+  deliverableId,
+  runId,
+  workerId,
+  workerName,
+  status,
+  feedback,
+  reviewedByName,
+  reviewedAt,
+  canReview = true,
+}: ReviewPanelProps) {
   const router = useRouter();
   const [editing, setEditing] = useState(status === "PENDING_REVIEW");
   const [text, setText] = useState(feedback ?? "");
   const [pending, startTransition] = useTransition();
   const [inFlight, setInFlight] = useState<"accept" | "reject" | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   function decide(decision: "accept" | "reject") {
     if (text.length > MAX_FEEDBACK) {
@@ -50,92 +65,137 @@ export function ReviewPanel({ deliverableId, runId, workerId, workerName, status
         toast.error(r.error);
         return;
       }
-      toast.success(decision === "accept" ? `Accepted — ${workerName} will take note` : `Sent back to ${workerName} with your feedback`);
+      toast.success(decision === "accept" ? `Accepted — ${workerName} will take note` : `Sent back to ${workerName} with your notes`);
       setEditing(false);
+      setSheetOpen(false);
       router.refresh();
     });
   }
 
   const decided = status !== "PENDING_REVIEW";
   const accepted = status === "ACCEPTED";
+  const verdictLine = decided
+    ? `${accepted ? "Accepted" : "Sent back"}${reviewedByName ? ` by ${reviewedByName}` : ""}${reviewedAt ? ` · ${formatDate(reviewedAt)}` : ""}`
+    : null;
+
+  function body(idSuffix: string): ReactNode {
+    if (!canReview) {
+      return (
+        <div className="space-y-3">
+          {decided ? (
+            <p className="flex items-center gap-2 text-[15px]">
+              <span aria-hidden="true" className={cn("size-[7px] rounded-full", accepted ? "bg-success" : "bg-danger")} />
+              {verdictLine}
+            </p>
+          ) : (
+            <p className="text-[15px] text-muted-foreground">Waiting on a review.</p>
+          )}
+          {feedback ? (
+            <blockquote className="border-l-[3px] border-input pl-4 text-[15px] text-pretty text-muted-foreground">{feedback}</blockquote>
+          ) : null}
+          <p className="text-footnote text-muted-foreground">Your role can’t review deliverables.</p>
+        </div>
+      );
+    }
+
+    if (decided && !editing) {
+      return (
+        <div className="space-y-4">
+          <p className="flex items-center gap-2 text-[15px]">
+            <span aria-hidden="true" className={cn("size-[7px] rounded-full", accepted ? "bg-success" : "bg-danger")} />
+            {verdictLine}
+          </p>
+          {feedback ? (
+            <blockquote className="border-l-[3px] border-input pl-4 text-[15px] text-pretty text-muted-foreground">{feedback}</blockquote>
+          ) : (
+            <p className="text-footnote text-muted-foreground">You didn’t leave any notes.</p>
+          )}
+          <Button variant="link" onClick={() => setEditing(true)}>
+            Change your mind
+          </Button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor={`feedback-${idSuffix}`}>Notes for {workerName} — optional</Label>
+          <Textarea
+            id={`feedback-${idSuffix}`}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="What was good, what was missing, what to do differently next time…"
+            rows={4}
+            maxLength={MAX_FEEDBACK}
+            disabled={pending}
+          />
+          <p className="text-footnote text-muted-foreground">
+            Specific notes make the strongest case when it’s time to propose a replacement.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Button onClick={() => decide("accept")} disabled={pending}>
+            {inFlight === "accept" ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+            Accept
+          </Button>
+          <Button variant="secondary" onClick={() => decide("reject")} disabled={pending}>
+            {inFlight === "reject" ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+            Send it back
+          </Button>
+          {decided ? (
+            <Button
+              variant="link"
+              disabled={pending}
+              onClick={() => {
+                setText(feedback ?? "");
+                setEditing(false);
+              }}
+            >
+              Keep my decision
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  const question = decided ? "Your review" : `How did ${workerName} do?`;
 
   return (
-    <Card className={cn(!decided && "ring-amber-200")}>
-      <CardHeader>
-        <CardTitle>Review</CardTitle>
-        <CardDescription>
-          {decided
-            ? `${accepted ? "Accepted" : "Rejected"}${reviewedByName ? ` by ${reviewedByName}` : ""}`
-            : `Your call counts toward ${workerName}’s score and guides any replacement.`}
-          {decided && reviewedAt ? (
-            <>
-              {" · "}
-              <RelativeTime iso={reviewedAt} />
-            </>
-          ) : null}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {decided && !editing ? (
-          <>
-            <div
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium",
-                accepted ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700",
-              )}
-            >
-              {accepted ? <Check className="size-4" aria-hidden="true" /> : <X className="size-4" aria-hidden="true" />}
-              {accepted ? "You accepted this deliverable" : "You sent this deliverable back"}
-            </div>
-            {feedback ? (
-              <blockquote className="border-l-2 pl-3 text-sm text-pretty italic text-muted-foreground">“{feedback}”</blockquote>
-            ) : (
-              <p className="text-sm text-muted-foreground">No feedback was left.</p>
-            )}
-            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-              <PencilLine aria-hidden="true" /> Change decision
-            </Button>
-          </>
-        ) : (
-          <>
-            <div className="space-y-2">
-              <Label htmlFor="deliverable-feedback">Feedback for {workerName} (optional)</Label>
-              <Textarea
-                id="deliverable-feedback"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="What was good, what was missing, what to do differently next time…"
-                rows={4}
-                maxLength={MAX_FEEDBACK}
-                disabled={pending}
-              />
-              <p className="text-xs text-muted-foreground">Rejections with specific feedback make the strongest case when proposing a replacement.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button onClick={() => decide("accept")} disabled={pending}>
-                {inFlight === "accept" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Check aria-hidden="true" />}
-                Accept
+    <>
+      <Card className="hidden lg:flex">
+        <CardHeader>
+          <CardTitle>{question}</CardTitle>
+        </CardHeader>
+        <CardContent>{body("desktop")}</CardContent>
+      </Card>
+
+      <div className="material-thick fixed inset-x-0 bottom-0 z-30 shadow-bar pb-[env(safe-area-inset-bottom)] lg:hidden">
+        <div className="flex items-center gap-3 px-4 py-3">
+          {decided ? (
+            <p className="flex min-w-0 flex-1 items-center gap-2 text-footnote text-muted-foreground">
+              <span aria-hidden="true" className={cn("size-[7px] shrink-0 rounded-full", accepted ? "bg-success" : "bg-danger")} />
+              <span className="truncate">{verdictLine}</span>
+            </p>
+          ) : (
+            <p className="min-w-0 flex-1 truncate text-footnote text-muted-foreground">{question}</p>
+          )}
+          <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+            <SheetTrigger asChild>
+              <Button className="h-11 px-6" variant={decided || !canReview ? "secondary" : "default"}>
+                {decided || !canReview ? "See review" : "Review"}
               </Button>
-              <Button variant="destructive" onClick={() => decide("reject")} disabled={pending}>
-                {inFlight === "reject" ? <Loader2 className="animate-spin" aria-hidden="true" /> : <X aria-hidden="true" />}
-                Reject
-              </Button>
-              {decided ? (
-                <Button
-                  variant="ghost"
-                  disabled={pending}
-                  onClick={() => {
-                    setText(feedback ?? "");
-                    setEditing(false);
-                  }}
-                >
-                  Keep current decision
-                </Button>
-              ) : null}
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
+            </SheetTrigger>
+            <SheetContent side="bottom" className="pb-8">
+              <SheetHeader className="pb-0">
+                <SheetTitle>{question}</SheetTitle>
+              </SheetHeader>
+              <div className="overflow-y-auto px-6">{body("mobile")}</div>
+            </SheetContent>
+          </Sheet>
+        </div>
+      </div>
+    </>
   );
 }

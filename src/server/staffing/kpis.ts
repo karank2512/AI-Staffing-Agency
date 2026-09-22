@@ -9,6 +9,7 @@ import {
   type Kpi,
   type RubricCriterion,
 } from "@/server/domain";
+import { config } from "@/server/config";
 import { toSnakeCase } from "./cues";
 
 /**
@@ -19,8 +20,12 @@ import { toSnakeCase } from "./cues";
 /** One per-run cost ceiling for the KPI, the deterministic check and the hard limit, so they never disagree. */
 const DEFAULT_MAX_COST_PER_RUN_USD = DEFAULT_RUN_LIMITS.maxCostPerRunUsd;
 
+/**
+ * Capped at the platform maximum (audit INF-04): a description that says "$10,000 per run" must not produce a
+ * KPI, a check and a limit that promise something the runtime will never allow.
+ */
 export function maxCostPerRun(spec: JobSpec): number {
-  return spec.budget.maxCostPerRunUsd ?? DEFAULT_MAX_COST_PER_RUN_USD;
+  return Math.min(spec.budget.maxCostPerRunUsd ?? DEFAULT_MAX_COST_PER_RUN_USD, config.limits.maxCostPerRunUsd);
 }
 
 export function requiredFieldNames(spec: JobSpec): string[] {

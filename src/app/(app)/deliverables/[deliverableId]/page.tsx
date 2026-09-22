@@ -1,103 +1,126 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Activity, Download } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { CopyButton } from "@/components/copy-button";
 import { DataTable } from "@/components/data-table";
-import { JsonView } from "@/components/json-view";
 import { Markdown } from "@/components/markdown";
 import { PageHeader } from "@/components/page-header";
-import { ScoreRing } from "@/components/score-ring";
 import { Section } from "@/components/section";
 import { SimulatedBadge } from "@/components/simulated-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { WorkerAvatar } from "@/components/worker-avatar";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDateTime, pluralize } from "@/lib/format";
+import { Card, CardContent } from "@/components/ui/card";
+import { formatDate, formatDateTime, pluralize } from "@/lib/format";
 import { requireSession } from "@/server/auth";
 import { isAppError } from "@/server/errors";
 import { getDeliverableDetail, type DeliverableDetail } from "@/server/queries/deliverables";
-import { EvaluationCards } from "../../runs/_components/evaluation-cards";
+import { EvaluationFindings } from "../../runs/_components/evaluation-findings";
+import { FORMAT_LABEL } from "../_components/deliverable-rows";
 import { ReviewPanel } from "./_components/review-panel";
 
 export const metadata: Metadata = { title: "Deliverable" };
 
-const FORMAT_LABEL = { MARKDOWN: "Report", CSV: "CSV", JSON: "JSON" } as const;
-
-async function load(organizationId: string, deliverableId: string): Promise<DeliverableDetail> {
+async function load(
+  organizationId: string,
+  deliverableId: string,
+  role: Awaited<ReturnType<typeof requireSession>>["role"],
+): Promise<DeliverableDetail> {
   try {
-    return await getDeliverableDetail(organizationId, deliverableId);
+    return await getDeliverableDetail(organizationId, deliverableId, { role });
   } catch (e) {
     if (isAppError(e) && e.code === "NOT_FOUND") notFound();
     throw e;
   }
 }
 
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+/** Blended automated score on 0..100, matching the deliverables index. */
+function automatedScore(d: DeliverableDetail): number | null {
+  const automated = d.evaluations.filter((e) => e.type !== "USER_FEEDBACK");
+  if (automated.length === 0) return null;
+  return Math.round((automated.reduce((s, e) => s + e.score, 0) / automated.length) * 100);
 }
 
-function Content({ d }: { d: DeliverableDetail }) {
+function Disclosure({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <details className="group/more border-t border-border">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-[15px] font-medium select-none [&::-webkit-details-marker]:hidden">
+        {label}
+        <ChevronDown
+          className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-[240ms] ease-standard group-open/more:rotate-180"
+          aria-hidden="true"
+        />
+      </summary>
+      <div className="pb-6">{children}</div>
+    </details>
+  );
+}
+
+/** The artifact itself: a report reads as an article, records read as a table in the spec's column order. */
+function Artifact({ d }: { d: DeliverableDetail }) {
   if (d.format === "MARKDOWN") {
     return (
-      <div className="space-y-3">
-        <Card>
-          <CardContent>
+      <div className="space-y-6">
+        <Card className="py-10 sm:py-14">
+          <CardContent className="mx-auto w-full max-w-[692px]">
+            {d.summary ? (
+              <p className="text-body-lg mb-8 border-b border-border pb-8 text-pretty text-muted-foreground">{d.summary}</p>
+            ) : null}
             <Markdown content={d.content} />
           </CardContent>
         </Card>
         {/* The report's own table is capped by compile_report; the full dataset behind it is one click away. */}
         {d.rows ? (
-          <details className="group">
-            <summary className="cursor-pointer text-xs text-muted-foreground select-none hover:text-foreground">
-              Show all {pluralize(d.rows.length, "underlying record")}
-            </summary>
-            <div className="mt-2">
-              <DataTable rows={d.rows} columns={d.columns ?? undefined} maxRows={200} showIndex={!d.columns?.includes("rank")} />
-            </div>
-          </details>
+          <Disclosure label={`All ${pluralize(d.rows.length, "record")} behind this report`}>
+            <DataTable rows={d.rows} columns={d.columns ?? undefined} maxRows={200} showIndex={!d.columns?.includes("rank")} />
+          </Disclosure>
         ) : null}
       </div>
     );
   }
+
   if (d.rows) {
     return (
-      <div className="space-y-3">
+      <div className="space-y-6">
+        {d.summary ? <p className="text-body-lg max-w-[692px] text-pretty text-muted-foreground">{d.summary}</p> : null}
         {/* Explicit columns: the stored records come out of jsonb with their keys reordered. Ranked records already
             number themselves, so the table's own "#" column would only compete with `rank`. */}
-        <DataTable rows={d.rows} columns={d.columns ?? undefined} maxRows={100} showIndex={!d.columns?.includes("rank")} />
-        <details className="group">
-          <summary className="cursor-pointer text-xs text-muted-foreground select-none hover:text-foreground">Show raw {FORMAT_LABEL[d.format]}</summary>
-          <pre className="mt-2 max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre">{d.content}</pre>
-        </details>
+        <DataTable
+          rows={d.rows}
+          columns={d.columns ?? undefined}
+          maxRows={100}
+          showIndex={!d.columns?.includes("rank")}
+          className="shadow-card"
+        />
+        <Disclosure label={`Show the raw ${FORMAT_LABEL[d.format]}`}>
+          <pre className="max-h-96 overflow-auto rounded-lg bg-muted p-4 font-mono text-[13px] leading-5 whitespace-pre">
+            {d.content}
+          </pre>
+        </Disclosure>
       </div>
     );
   }
-  const parsed = d.format === "JSON" ? parseJson(d.content) : null;
+
   return (
-    <Card>
-      <CardContent>
-        {parsed !== null ? (
-          <JsonView label="Content" value={parsed} defaultOpen />
-        ) : (
-          <pre className="max-h-[32rem] overflow-auto font-mono text-xs whitespace-pre">{d.content}</pre>
-        )}
+    <Card className="py-10">
+      <CardContent className="mx-auto w-full max-w-[692px]">
+        {d.summary ? (
+          <p className="text-body-lg mb-8 border-b border-border pb-8 text-pretty text-muted-foreground">{d.summary}</p>
+        ) : null}
+        <pre className="max-h-[32rem] overflow-auto rounded-lg bg-muted p-4 font-mono text-[13px] leading-5 whitespace-pre">
+          {d.content}
+        </pre>
       </CardContent>
     </Card>
   );
 }
 
-function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-2 text-sm">
+    <div className="flex items-baseline justify-between gap-4 border-b border-border py-2.5 text-footnote last:border-0">
       <dt className="shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-right">{children}</dd>
+      <dd className="min-w-0 text-right text-foreground">{children}</dd>
     </div>
   );
 }
@@ -105,159 +128,123 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 export default async function DeliverablePage({ params }: { params: Promise<{ deliverableId: string }> }) {
   const { deliverableId } = await params;
   const s = await requireSession();
-  const d = await load(s.organizationId, deliverableId);
+  const d = await load(s.organizationId, deliverableId, s.role);
   const { worker, job, run } = d;
-
-  const checks = d.evaluations.find((e) => e.type === "DETERMINISTIC") ?? null;
-  const judge = d.evaluations.find((e) => e.type === "LLM_JUDGE") ?? null;
-  const copyLabel = d.format === "CSV" ? "Copy CSV" : d.format === "JSON" ? "Copy JSON" : "Copy markdown";
+  const score = automatedScore(d);
+  const copyLabel = d.format === "CSV" ? "Copy CSV" : d.format === "JSON" ? "Copy JSON" : "Copy text";
 
   return (
     <>
       <PageHeader
-        breadcrumbs={[
-          { label: "Workforce", href: "/workforce" },
-          { label: worker.name, href: `/workers/${worker.id}` },
-          { label: "Deliverables", href: "/deliverables" },
-          { label: d.title },
-        ]}
-        title={
-          <span className="flex flex-wrap items-center gap-3">
-            <span className="text-pretty">{d.title}</span>
+        backHref="/deliverables"
+        backLabel="Deliverables"
+        title={d.title}
+        description={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-footnote text-muted-foreground">
+            <Link href={`/workers/${worker.id}`} className="inline-flex items-center gap-1.5 text-link hover:underline">
+              <WorkerAvatar name={worker.name} color={worker.avatarColor} size="xs" />
+              {worker.name}
+            </Link>
+            <span aria-hidden="true">·</span>
+            <span>{formatDate(d.createdAt)}</span>
+            <span aria-hidden="true">·</span>
+            <span className="metric">{score === null ? "Not scored yet" : `Scored ${score}`}</span>
+            <span aria-hidden="true">·</span>
             <StatusBadge kind="deliverable" status={d.status} />
             {run.simulated ? <SimulatedBadge /> : null}
           </span>
         }
-        description={
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <Link href={`/workers/${worker.id}`} className="inline-flex items-center gap-1.5 hover:underline">
-              <WorkerAvatar name={worker.name} color={worker.avatarColor} size="sm" />
-              {worker.name} delivered this
-            </Link>
-            <span>·</span>
-            <span>{formatDateTime(d.createdAt)}</span>
-            <span>·</span>
-            <Badge variant="outline">{FORMAT_LABEL[d.format]}</Badge>
-            {d.recordCount !== null ? <span>· {pluralize(d.recordCount, "record")}</span> : null}
-          </span>
-        }
         actions={
           <>
-            <CopyButton value={d.content} label={copyLabel} className="text-foreground" />
-            <Button variant="outline" asChild>
+            <Button variant="secondary" asChild>
               <a href={`/deliverables/${d.id}/download`} download>
-                <Download aria-hidden="true" /> Download
+                Download
               </a>
             </Button>
-            <Button variant="outline" asChild>
+            <CopyButton value={d.content} label={copyLabel} className="text-link" />
+            <Button variant="link" asChild>
               <Link href={`/runs/${run.id}`}>
-                <Activity aria-hidden="true" /> View run
+                See the run <ChevronRight data-icon="inline-end" aria-hidden="true" />
               </Link>
             </Button>
           </>
         }
       />
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="space-y-8 lg:col-span-2">
-          {d.summary ? (
-            <Card className="bg-muted/30">
-              <CardHeader>
-                <CardTitle>In short</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-pretty">{d.summary}</p>
-              </CardContent>
-            </Card>
-          ) : null}
+      <div className="grid gap-6 lg:grid-cols-12 lg:gap-10">
+        <div className="space-y-14 lg:col-span-8">
+          <Artifact d={d} />
 
-          <Section title={d.format === "MARKDOWN" ? "Report" : "Records"}>
-            <Content d={d} />
-          </Section>
-
-          <Section title="Evaluation" description="Automated checks, the reviewer model’s take, and your own verdict.">
-            <EvaluationCards
+          <Section title="How it measured up" description="Automated checks, the reviewer’s read, and your own verdict.">
+            <EvaluationFindings
               evaluations={d.evaluations}
               workerName={worker.name}
-              emptyDescription={run.status === "SUCCEEDED" ? "Checks haven’t landed yet — refresh in a moment." : "Evaluation runs once the run completes."}
+              score={score}
+              emptyDescription={
+                run.status === "SUCCEEDED"
+                  ? "Checks haven’t landed yet — they’ll appear here shortly."
+                  : "Evaluation runs once the run completes."
+              }
             />
           </Section>
         </div>
 
-        <div className="space-y-6">
-          <ReviewPanel
-            deliverableId={d.id}
-            runId={run.id}
-            workerId={worker.id}
-            workerName={worker.name}
-            status={d.status}
-            feedback={d.feedback}
-            reviewedByName={d.reviewedByName}
-            reviewedAt={d.reviewedAt}
-          />
+        <aside className="space-y-6 lg:col-span-4">
+          <div className="lg:sticky lg:top-[88px] lg:space-y-6">
+            <ReviewPanel
+              deliverableId={d.id}
+              runId={run.id}
+              workerId={worker.id}
+              workerName={worker.name}
+              status={d.status}
+              feedback={d.feedback}
+              reviewedByName={d.reviewedByName}
+              reviewedAt={d.reviewedAt}
+              canReview={d.permissions["deliverables.review"]}
+            />
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Scores</CardTitle>
-              <CardDescription>Out of 100.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="flex items-center gap-3">
-                  <ScoreRing score={checks ? Math.round(checks.score * 100) : null} size={44} />
-                  <div>
-                    <p className="text-sm font-medium">Checks</p>
-                    <p className="text-xs text-muted-foreground">{checks ? (checks.passed ? "Passed" : "Needs work") : "Not run yet"}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <ScoreRing score={judge ? Math.round(judge.score * 100) : null} size={44} />
-                  <div>
-                    <p className="text-sm font-medium">Reviewer</p>
-                    <p className="text-xs text-muted-foreground">{judge ? (judge.passed ? "Approved" : "Concerns") : "Not run yet"}</p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Details</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <dl className="divide-y">
-                <DetailRow label="Worker">
-                  <Link href={`/workers/${worker.id}`} className="hover:underline">
-                    {worker.name}
-                  </Link>
-                  <span className="text-muted-foreground"> · {worker.title}</span>
-                </DetailRow>
-                <DetailRow label="Job">
-                  <Link href={`/jobs/${job.id}`} className="hover:underline">
-                    {job.title}
-                  </Link>
-                </DetailRow>
-                <DetailRow label="Version">v{d.version.version}</DetailRow>
-                <DetailRow label="Run">
-                  <Link href={`/runs/${run.id}`} className="inline-flex items-center gap-2 hover:underline">
-                    <StatusBadge kind="run" status={run.status} />
-                  </Link>
-                </DetailRow>
-                <DetailRow label="Format">{FORMAT_LABEL[d.format]}</DetailRow>
-                <DetailRow label="Created">{formatDateTime(d.createdAt)}</DetailRow>
-                {d.reviewedAt ? <DetailRow label="Reviewed">{formatDateTime(d.reviewedAt)}</DetailRow> : null}
-                <DetailRow label="ID">
-                  <span className="inline-flex items-center gap-1 font-mono text-xs">
-                    {d.id.slice(0, 12)}…
-                    <CopyButton value={d.id} />
-                  </span>
-                </DetailRow>
-              </dl>
-            </CardContent>
-          </Card>
-        </div>
+            <Card>
+              <CardContent>
+                <dl>
+                  <Fact label="Worker">
+                    <Link href={`/workers/${worker.id}`} className="text-link hover:underline">
+                      {worker.name}
+                    </Link>
+                  </Fact>
+                  <Fact label="Job">
+                    <Link href={`/jobs/${job.id}`} className="text-link hover:underline">
+                      {job.title}
+                    </Link>
+                  </Fact>
+                  <Fact label="Version">v{d.version.version}</Fact>
+                  <Fact label="Run">
+                    <Link href={`/runs/${run.id}`} className="inline-flex text-link hover:underline">
+                      <StatusBadge kind="run" status={run.status} />
+                    </Link>
+                  </Fact>
+                  <Fact label="Format">{FORMAT_LABEL[d.format]}</Fact>
+                  {d.recordCount !== null ? (
+                    <Fact label="Records">
+                      <span className="metric">{d.recordCount}</span>
+                    </Fact>
+                  ) : null}
+                  <Fact label="Handed in">{formatDateTime(d.createdAt)}</Fact>
+                  {d.reviewedAt ? <Fact label="Reviewed">{formatDateTime(d.reviewedAt)}</Fact> : null}
+                  <Fact label="Id">
+                    <span className="inline-flex items-center gap-1 font-mono text-caption">
+                      {d.id.slice(0, 10)}…
+                      <CopyButton value={d.id} />
+                    </span>
+                  </Fact>
+                </dl>
+              </CardContent>
+            </Card>
+          </div>
+        </aside>
       </div>
+
+      {/* Room for the mobile review bar. */}
+      <div className="h-16 lg:hidden" aria-hidden="true" />
     </>
   );
 }

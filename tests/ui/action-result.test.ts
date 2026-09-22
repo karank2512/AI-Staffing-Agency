@@ -38,12 +38,15 @@ describe("runAction", () => {
     expect(result).toEqual({ ok: false, error: "name: Name must be at least 3 characters" });
   });
 
-  it("hides unknown errors behind a generic message and logs them", async () => {
+  it("hides unknown errors behind a generic message with a support reference, and logs them", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await runAction(async () => {
       throw new Error("connect ECONNREFUSED 127.0.0.1:5432");
     });
-    expect(result).toEqual({ ok: false, error: GENERIC_ACTION_ERROR });
+    // Internals never reach the client: one generic sentence plus a ref that appears in the log line.
+    expect(result).toMatchObject({ ok: false });
+    expect(result).toHaveProperty("error", expect.stringContaining(GENERIC_ACTION_ERROR));
+    expect(result).toHaveProperty("error", expect.stringMatching(/\(ref [0-9a-f]{6}\)$/));
     expect(log).toHaveBeenCalledOnce();
   });
 

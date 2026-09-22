@@ -2,23 +2,21 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import { Lightbulb, MessageSquare, Send, Sparkles } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { WorkerAvatar } from "@/components/worker-avatar";
 import { cn } from "@/lib/utils";
 import type { ChatMessageView, WorkerChatView } from "@/server/queries/worker-manage";
 import { sendMessageAction } from "../manage-actions";
 import { ChatMessage, ChatTyping } from "./chat-message";
 
-/** One of each kind, so the first click shows what the worker can do. */
-const SUGGESTIONS: ReadonlyArray<{ text: string; kind: "question" | "instruction" | "change" }> = [
-  { text: "What did you do in your last run?", kind: "question" },
-  { text: "This time, focus on European companies", kind: "instruction" },
-  { text: "From now on, include the lead investor for every round", kind: "change" },
-];
+/** One of each kind, so the first message shows what the worker can do. */
+const SUGGESTIONS = [
+  "What did you do in your last run?",
+  "This time, focus on European companies",
+  "From now on, include the lead investor for every round",
+] as const;
 
 const MESSAGE_MAX_CHARS = 4_000;
 
@@ -31,34 +29,41 @@ export interface ChatPanelProps {
   worker: WorkerChatView["worker"];
   messages: ChatMessageView[];
   pendingInstructions: number;
+  /** `workers.chat` — the composer is read-only for roles that can't send. */
+  canSend: boolean;
 }
 
-export function ChatPanel({ worker, messages, pendingInstructions }: ChatPanelProps) {
+export function ChatPanel({ worker, messages, pendingInstructions, canSend: mayChat }: ChatPanelProps) {
   const router = useRouter();
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingSend | null>(null);
   // Messages the server has not rendered yet (a send just finished); dropped once they arrive via props.
   const [extra, setExtra] = useState<ChatMessageView[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const endRef = useRef<HTMLDivElement>(null);
 
   const all = useMemo(() => {
     const seen = new Set(messages.map((m) => m.id));
     return [...messages, ...extra.filter((m) => !seen.has(m.id))];
   }, [messages, extra]);
 
-  // Keep the newest message in view without scrolling the page itself (scrollIntoView would move the window too).
+  // Keep the newest message in view once a conversation is under way (never on first paint, which would
+  // yank the page down past the header).
+  const seen = useRef(0);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (seen.current > 0 && all.length + (pending ? 1 : 0) > seen.current) {
+      endRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    seen.current = all.length + (pending ? 1 : 0);
   }, [all.length, pending]);
 
   const retired = worker.status === "RETIRED";
-  const canSend = draft.trim().length > 0 && draft.length <= MESSAGE_MAX_CHARS && pending === null && !retired;
+  const composerDisabled = pending !== null || retired || !mayChat;
+  const canSubmit = draft.trim().length > 0 && draft.length <= MESSAGE_MAX_CHARS && !composerDisabled;
 
   async function send(text: string) {
     const content = text.trim();
-    if (content.length === 0 || pending || retired) return;
+    if (content.length === 0 || composerDisabled) return;
     const local: PendingSend = { id: `pending-${Date.now()}`, content };
     setPending(local);
     setDraft("");
@@ -90,108 +95,108 @@ export function ChatPanel({ worker, messages, pendingInstructions }: ChatPanelPr
     }
   }
 
-  function applySuggestion(text: string) {
-    setDraft(text);
-    textareaRef.current?.focus();
-  }
+  const empty = all.length === 0 && !pending;
 
   return (
-    <Card className="overflow-hidden py-0">
-      <div className="flex items-center gap-3 border-b bg-muted/30 px-4 py-3">
-        <WorkerAvatar name={worker.name} color={worker.avatarColor} size="md" />
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{worker.name}</p>
-          <p className="truncate text-xs text-muted-foreground">{worker.title}</p>
-        </div>
-        {pendingInstructions > 0 ? (
-          <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
-            <Lightbulb className="size-3" aria-hidden="true" />
-            {pendingInstructions === 1 ? "1 instruction queued for the next run" : `${pendingInstructions} instructions queued for the next run`}
-          </span>
-        ) : null}
-      </div>
-
-      <CardContent ref={scrollRef} className="max-h-[60vh] min-h-[22rem] overflow-y-auto px-4 py-5">
-        {all.length === 0 && !pending ? (
-          <div className="flex h-full min-h-[18rem] flex-col items-center justify-center gap-3 text-center">
-            <span className="flex size-10 items-center justify-center rounded-full bg-muted">
-              <MessageSquare className="size-5 text-muted-foreground" aria-hidden="true" />
-            </span>
-            <div className="space-y-1">
-              <p className="text-sm font-medium">Talk to {worker.name} like a colleague</p>
-              <p className="max-w-sm text-xs text-pretty text-muted-foreground">
-                Ask what they did, adjust the next run, or change how they work for good. Lasting changes come back as a proposal for
-                you to approve.
-              </p>
-            </div>
+    <div className="mx-auto w-full max-w-[760px]">
+      <div className="flex min-h-[46vh] flex-col justify-end gap-4 pb-4">
+        {empty ? (
+          <div className="py-10 text-center">
+            <h2 className="text-title-2 text-balance">Talk to {worker.name} like a colleague</h2>
+            <p className="text-body mx-auto mt-2.5 max-w-[46ch] text-pretty text-muted-foreground">
+              Ask what they did, adjust the next run, or change how they work for good. Lasting changes come back
+              as a proposal for you to approve.
+            </p>
           </div>
         ) : (
-          <div className="space-y-5">
-            {all.map((m) => (
-              <ChatMessage key={m.id} message={m} worker={worker} />
-            ))}
-            {pending ? (
-              <>
-                <ChatMessage
-                  message={{
-                    id: pending.id,
-                    role: "USER",
-                    content: pending.content,
-                    classification: null,
-                    createdAt: new Date().toISOString(),
-                    simulated: false,
-                    proposedVersionId: null,
-                    proposedVersion: null,
-                    proposalStatus: null,
-                    href: null,
-                    normalizedInstruction: null,
-                  }}
-                  worker={worker}
-                  pending
-                />
-                <ChatTyping worker={worker} />
-              </>
-            ) : null}
-          </div>
+          all.map((m) => <ChatMessage key={m.id} message={m} worker={worker} />)
         )}
-      </CardContent>
 
-      <form onSubmit={onSubmit} className="space-y-3 border-t bg-muted/20 px-4 py-3">
-        <div className="flex flex-wrap gap-1.5">
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s.text}
-              type="button"
-              disabled={pending !== null || retired}
-              onClick={() => applySuggestion(s.text)}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full border bg-card px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:opacity-50",
-              )}
-            >
-              <Sparkles className="size-3" aria-hidden="true" />
-              {s.text}
-            </button>
-          ))}
-        </div>
+        {pending ? (
+          <>
+            <ChatMessage
+              message={{
+                id: pending.id,
+                role: "USER",
+                content: pending.content,
+                classification: null,
+                createdAt: new Date().toISOString(),
+                simulated: false,
+                proposedVersionId: null,
+                proposedVersion: null,
+                proposalStatus: null,
+                href: null,
+                normalizedInstruction: null,
+              }}
+              worker={worker}
+              pending
+            />
+            <ChatTyping worker={worker} />
+          </>
+        ) : null}
+        <div ref={endRef} />
+      </div>
+
+      <form
+        onSubmit={onSubmit}
+        className="material-thick sticky bottom-0 -mx-4 space-y-3 px-4 pt-3 pb-4 shadow-bar sm:-mx-6 sm:px-6"
+      >
+        {empty && !composerDisabled ? (
+          <div className="flex flex-wrap gap-2">
+            {SUGGESTIONS.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => {
+                  setDraft(s);
+                  textareaRef.current?.focus();
+                }}
+                className="text-footnote rounded-full bg-secondary px-3.5 py-1.5 font-medium text-foreground transition-colors duration-200 ease-standard hover:bg-secondary-hover"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         <div className="flex items-end gap-2">
           <Textarea
             ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
-            disabled={pending !== null || retired}
-            placeholder={retired ? `${worker.name} has been retired and no longer takes messages.` : `Message ${worker.name}…`}
+            disabled={composerDisabled}
+            placeholder={
+              retired
+                ? `${worker.name} has been retired and no longer takes messages.`
+                : !mayChat
+                  ? "Your role can read this conversation but not send messages."
+                  : `Message ${worker.name}…`
+            }
             aria-label={`Message ${worker.name}`}
-            rows={2}
+            rows={1}
             maxLength={MESSAGE_MAX_CHARS}
-            className="min-h-10 flex-1 resize-none bg-card"
+            className={cn("max-h-40 min-h-11 flex-1 resize-none rounded-[22px] py-2.5")}
           />
-          <Button type="submit" size="icon" disabled={!canSend} aria-label="Send message">
-            <Send aria-hidden="true" />
+          <Button type="submit" size="icon" disabled={!canSubmit} aria-label="Send message" className="mb-0.5">
+            <ArrowUp aria-hidden="true" />
           </Button>
         </div>
-        <p className="text-[11px] text-muted-foreground">Enter to send · Shift+Enter for a new line</p>
+
+        <p className="text-caption flex flex-wrap items-center gap-x-2 text-tertiary">
+          <span>Enter sends · Shift+Enter adds a line</span>
+          {pendingInstructions > 0 ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>
+                {pendingInstructions === 1
+                  ? "1 one-off instruction is queued for the next run"
+                  : `${pendingInstructions} one-off instructions are queued for the next run`}
+              </span>
+            </>
+          ) : null}
+        </p>
       </form>
-    </Card>
+    </div>
   );
 }

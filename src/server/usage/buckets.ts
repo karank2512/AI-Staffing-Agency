@@ -4,6 +4,7 @@ import { eachDayOfInterval, format } from "date-fns";
 
 export const DAY_FORMAT = "yyyy-MM-dd";
 
+/** The JS side of the SQL bucketing in ./aggregate.ts — both must name the same local calendar day. */
 export function dayKey(date: Date): string {
   return format(date, DAY_FORMAT);
 }
@@ -18,12 +19,3 @@ export function roundUsd(value: number): number {
   return Math.round((value + Number.EPSILON) * 1e6) / 1e6;
 }
 
-/** Insert-or-get for the aggregation maps. */
-export function bucket<K, V>(map: Map<K, V>, key: K, init: () => V): V {
-  let value = map.get(key);
-  if (value === undefined) {
-    value = init();
-    map.set(key, value);
-  }
-  return value;
-}

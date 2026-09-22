@@ -4,8 +4,7 @@ import { evaluateRun, refreshWorkerScore } from "@/server/evaluation";
 import { errorMessage } from "@/server/errors";
 import { tools } from "@/server/tools";
 import { parseCheckpoint } from "./checkpoint";
-import { oneLine } from "./compact";
-import { RunCancelled, RunFailure } from "./failure";
+import { publicRunError, RunCancelled, RunFailure } from "./failure";
 import { log } from "./log";
 import type { RunSlice } from "./slice";
 import type { AgentCheckpoint, ExecuteOutcome, RunOutput } from "./types";
@@ -132,12 +131,13 @@ async function agentToKeep(slice: RunSlice, componentId: string): Promise<AgentC
 
 export async function finishFailure(slice: RunSlice, failure: RunFailure): Promise<ExecuteOutcome> {
   const { run, cp } = slice;
-  const message = oneLine(failure.message, 1_000);
+  // Everything a member can read about the failure is redacted and clipped; the raw text stays in the log.
+  const message = publicRunError(failure.message);
   await slice.steps.record({
     kind: "ERROR",
     title: message,
     status: "FAILED",
-    error: failure.message,
+    error: message,
     componentId: slice.blueprint.components[slice.componentStart.index]?.id,
     output: { code: failure.code, retryable: failure.retryable, attempt: run.attempt, maxAttempts: run.maxAttempts },
   });
@@ -165,13 +165,13 @@ export async function finishFailure(slice: RunSlice, failure: RunFailure): Promi
       error: message,
       checkpoint: toJson(slice.snapshot()),
     });
-    log.warn(`run ${run.id} failed on attempt ${run.attempt}/${run.maxAttempts}, retrying: ${message}`);
+    log.warn(`run ${run.id} failed on attempt ${run.attempt}/${run.maxAttempts}, retrying: ${failure.message}`);
     return { status: "FAILED", error: message, willRetry: true };
   }
 
   const checkpoint = slice.snapshot();
   await slice.lock.transition("FAILED", { error: message, checkpoint: toJson(checkpoint), durationMs: checkpoint.counters.activeMs, finishedAt: new Date() });
-  log.warn(`run ${run.id} failed (${failure.code}): ${message}`);
+  log.warn(`run ${run.id} failed (${failure.code}): ${failure.message}`);
   try {
     await refreshWorkerScore(run.workerId);
   } catch (e) {

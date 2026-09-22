@@ -24,8 +24,21 @@ describe("decideAccess — signed out", () => {
   });
 
   it("keeps the sign-in URL clean when heading to the default landing page", () => {
-    expect(decideAccess(request({ pathname: "/" }))).toEqual({ kind: "redirect", to: "/sign-in" });
     expect(decideAccess(request({ pathname: "/workforce" }))).toEqual({ kind: "redirect", to: "/sign-in" });
+  });
+
+  it("lets the public pages through: the landing page, sign-up, invite links and the ops probes", () => {
+    for (const pathname of ["/", "/sign-up", "/invite/abc123", "/api/health", "/api/ready"]) {
+      expect(decideAccess(request({ pathname }))).toEqual({ kind: "allow" });
+    }
+    expect(decideAccess(request({ pathname: "/sign-up", method: "POST" }))).toEqual({ kind: "allow" });
+    expect(decideAccess(request({ pathname: "/invite/abc123", method: "POST" }))).toEqual({ kind: "allow" });
+  });
+
+  it("does not let look-alikes of the public paths through", () => {
+    expect(decideAccess(request({ pathname: "/invited" })).kind).toBe("redirect");
+    expect(decideAccess(request({ pathname: "/sign-upgrade" })).kind).toBe("redirect");
+    expect(decideAccess(request({ pathname: "/api/healthz" }))).toEqual({ kind: "unauthorized" });
   });
 
   it("answers /api/* with 401 instead of a redirect", () => {
@@ -55,6 +68,21 @@ describe("decideAccess — signed in", () => {
   it("allows pages and API routes", () => {
     expect(decideAccess(request({ isAuthenticated: true }))).toEqual({ kind: "allow" });
     expect(decideAccess(request({ pathname: "/api/runs/run_1", isAuthenticated: true }))).toEqual({ kind: "allow" });
+  });
+
+  it("sends visitors on /sign-up into the app too", () => {
+    expect(decideAccess(request({ pathname: "/sign-up", isAuthenticated: true }))).toEqual({
+      kind: "redirect",
+      to: DEFAULT_SIGNED_IN_PATH,
+    });
+    // …but never its form POST.
+    expect(decideAccess(request({ pathname: "/sign-up", method: "POST", isAuthenticated: true }))).toEqual({
+      kind: "allow",
+    });
+  });
+
+  it("leaves an invite link reachable while signed in (they may be joining a second workspace)", () => {
+    expect(decideAccess(request({ pathname: "/invite/abc123", isAuthenticated: true }))).toEqual({ kind: "allow" });
   });
 
   it("sends visitors on /sign-in into the app, honouring a safe callbackUrl", () => {
@@ -99,6 +127,8 @@ describe("safeCallbackUrl", () => {
     ["relative path without a leading slash", "workforce"],
     ["the root", "/"],
     ["the sign-in page itself", "/sign-in?callbackUrl=%2Fsign-in"],
+    ["the sign-up page", "/sign-up"],
+    ["an invite link", "/invite/abc123"],
     ["an API route", "/api/runs/run_1"],
     ["empty string", ""],
     ["an absurdly long value", `/${"a".repeat(3000)}`],

@@ -1,212 +1,160 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowDownToLine, ArrowUpFromLine, Bot, ChartColumn, FlaskConical, Receipt, Wallet, Wrench } from "lucide-react";
-import { AutoRefresh } from "@/components/auto-refresh";
+import { subDays } from "date-fns";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
 import { Section } from "@/components/section";
-import { SimulatedBadge } from "@/components/simulated-badge";
-import { StatCard } from "@/components/stat-card";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDate, formatNumber, formatPercent, formatTokens, formatUsd, pluralize } from "@/lib/format";
+import { Card } from "@/components/ui/card";
+import { formatDate, formatNumber, formatPercent, formatTokens, formatUsd } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { requireSession } from "@/server/auth";
 import { getUsagePage, parseUsageRange } from "@/server/queries/usage";
-import { BillingCard } from "./_components/billing-card";
+import { BillingNote } from "./_components/billing-note";
 import { RangePicker } from "./_components/range-picker";
 import { UsageChart } from "./_components/usage-chart";
 import { ModelCostTable, ToolCostTable, WorkerCostTable } from "./_components/usage-tables";
 
 export const metadata: Metadata = { title: "Usage" };
 
+/** One quiet figure beside the headline number. */
+function Figure({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="bg-card p-5 sm:p-6">
+      <p className="text-footnote font-medium text-muted-foreground">{label}</p>
+      <p className="metric mt-1 text-[17px] font-semibold text-foreground">{value}</p>
+      {hint ? <p className="text-footnote mt-0.5 truncate text-muted-foreground">{hint}</p> : null}
+    </div>
+  );
+}
+
 export default async function UsagePage({ searchParams }: { searchParams: Promise<{ range?: string | string[] }> }) {
   const [s, params] = await Promise.all([requireSession(), searchParams]);
   const days = parseUsageRange(params.range);
-  const usage = await getUsagePage(s.organizationId, days);
+  const now = new Date();
+  const usage = await getUsagePage(s.organizationId, days, now);
   const { totals } = usage;
-  const modelShare = totals.costUsd > 0 ? totals.modelCostUsd / totals.costUsd : null;
-  const topWorker = usage.byWorker.find((w) => w.workerId !== null) ?? null;
+
+  // The same window, one window back — the only honest way to say "less than last time".
+  const previous = usage.hasUsage ? await getUsagePage(s.organizationId, days, subDays(now, days)) : null;
+  const previousCost = previous?.totals.costUsd ?? 0;
+  const change = previousCost > 0 ? (totals.costUsd - previousCost) / previousCost : null;
+  const mixedSimulation = usage.byModel.some((m) => m.simulated) && usage.byModel.some((m) => !m.simulated);
 
   return (
     <>
       <PageHeader
-        title={
-          <span className="flex flex-wrap items-center gap-2.5">
-            Usage
-            {usage.simulatedMode ? <SimulatedBadge /> : null}
-          </span>
-        }
-        description={`What your workers cost between ${formatDate(usage.from)} and ${formatDate(usage.to)} — model time, tool fees and what it would bill.`}
+        title="Usage"
+        description={`What your workers cost between ${formatDate(usage.from)} and ${formatDate(usage.to)}.`}
         actions={<RangePicker active={usage.days} />}
       />
 
-      <div className="space-y-8">
+      <div className="space-y-14">
         {usage.hasUsage ? (
           <>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <StatCard
-                label={`Cost, last ${usage.days} days`}
-                value={formatUsd(totals.costUsd)}
-                hint={totals.runs > 0 ? `across ${pluralize(totals.runs, "run")}` : "Platform work only"}
-                icon={Wallet}
-                trend={usage.byDay.length > 1 ? { values: usage.byDay.map((d) => d.costUsd), tone: "neutral" } : undefined}
-              />
-              <StatCard
-                label="Billable"
-                value={formatUsd(totals.billableUsd)}
-                hint={`Cost × ${formatNumber(usage.marginMultiplier, 2)} margin`}
-                icon={Receipt}
-              />
-              <StatCard
-                label="Tokens"
-                value={
-                  <span className="flex items-baseline gap-2">
-                    <span className="flex items-center gap-1">
-                      <ArrowDownToLine className="size-3.5 text-muted-foreground" aria-hidden="true" />
-                      {formatTokens(totals.inputTokens)}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <ArrowUpFromLine className="size-3.5 text-muted-foreground" aria-hidden="true" />
-                      {formatTokens(totals.outputTokens)}
-                    </span>
-                  </span>
-                }
-                hint="In (prompts) · out (answers)"
-                icon={Bot}
-              />
-              <StatCard
-                label="Calls"
-                value={
-                  <span className="flex items-baseline gap-2">
-                    <span>{formatNumber(totals.modelCalls, 0)}</span>
-                    <span className="text-sm font-normal text-muted-foreground">model</span>
-                    <span>{formatNumber(totals.toolCalls, 0)}</span>
-                    <span className="text-sm font-normal text-muted-foreground">tool</span>
-                  </span>
-                }
-                hint={
-                  totals.simulatedShare === null
-                    ? "No spend recorded"
-                    : totals.simulatedShare >= 0.999
-                      ? "All simulated — reference prices, not spend"
-                      : totals.simulatedShare > 0
-                        ? `${formatPercent(totals.simulatedShare)} of cost was simulated`
-                        : "All live — real provider spend"
-                }
-                icon={FlaskConical}
-              />
-            </div>
-
-            <div className="grid gap-6 lg:grid-cols-3">
-              <Card className="lg:col-span-2">
-                <CardHeader>
-                  <CardTitle>Daily cost</CardTitle>
-                  <CardDescription>Model calls stacked on tool fees, one bar per day. Hover for the split.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <UsageChart byDay={usage.byDay} />
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Where the money goes</CardTitle>
-                  <CardDescription>Model thinking vs tool fees.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {modelShare === null ? (
-                    <p className="text-sm text-muted-foreground">Calls were made, but none of them carried a cost.</p>
-                  ) : (
-                    <>
-                      <div className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                        <div className="h-full rounded-l-full bg-chart-1" style={{ width: `${Math.round(modelShare * 100)}%` }} />
-                        <div className="h-full flex-1 rounded-r-full bg-chart-2" />
-                      </div>
-                      <dl className="space-y-2 text-sm">
-                        <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-2 text-muted-foreground">
-                            <span className="size-2.5 rounded-full bg-chart-1" aria-hidden="true" />
-                            <Bot className="size-3.5" aria-hidden="true" />
-                            Models
-                          </dt>
-                          <dd className="metric font-medium">
-                            {formatUsd(totals.modelCostUsd)} <span className="text-xs text-muted-foreground">({formatPercent(modelShare)})</span>
-                          </dd>
-                        </div>
-                        <div className="flex items-center justify-between gap-3">
-                          <dt className="flex items-center gap-2 text-muted-foreground">
-                            <span className="size-2.5 rounded-full bg-chart-2" aria-hidden="true" />
-                            <Wrench className="size-3.5" aria-hidden="true" />
-                            Tools
-                          </dt>
-                          <dd className="metric font-medium">
-                            {formatUsd(totals.toolCostUsd)} <span className="text-xs text-muted-foreground">({formatPercent(1 - modelShare)})</span>
-                          </dd>
-                        </div>
-                      </dl>
-                    </>
-                  )}
-                  {topWorker ? (
-                    <p className="border-t pt-3 text-xs text-pretty text-muted-foreground">
-                      {topWorker.href ? (
-                        <Link href={`${topWorker.href}?tab=cost`} className="font-medium text-foreground hover:underline">
-                          {topWorker.workerName}
-                        </Link>
-                      ) : (
-                        <span className="font-medium text-foreground">{topWorker.workerName}</span>
-                      )}{" "}
-                      is your biggest line item at {formatUsd(topWorker.costUsd)}
-                      {totals.costUsd > 0 ? ` (${formatPercent(topWorker.costUsd / totals.costUsd)} of the total)` : ""}.
+            <Card className="p-0">
+              <div className="grid gap-px bg-border lg:grid-cols-[1.3fr_1fr]">
+                <div className="bg-card p-6 sm:p-8">
+                  <p className="text-footnote font-medium text-muted-foreground">Spent in the last {days} days</p>
+                  <p className="text-metric-xl mt-2 text-foreground">{formatUsd(totals.costUsd)}</p>
+                  <p className="text-footnote mt-2 text-muted-foreground">
+                    {change === null ? (
+                      <>Nothing was spent in the {days} days before this.</>
+                    ) : (
+                      <>
+                        <span className={cn(change > 0 ? "text-danger" : change < 0 ? "text-success" : undefined)}>
+                          <span aria-hidden="true">{change > 0 ? "↑ " : change < 0 ? "↓ " : "→ "}</span>
+                          {formatPercent(Math.abs(change))}
+                        </span>{" "}
+                        vs the previous {days} days
+                      </>
+                    )}
+                  </p>
+                  {usage.simulatedMode ? (
+                    <p className="text-footnote mt-5 max-w-[46ch] text-pretty text-muted-foreground">
+                      Simulated. Costs are priced for reference, and nothing is billed.
                     </p>
                   ) : null}
-                </CardContent>
-              </Card>
-            </div>
+                </div>
 
-            <Section title="By worker" description="Who is spending what. Click a worker to see their cost breakdown by run and version.">
-              <WorkerCostTable rows={usage.byWorker} totalCostUsd={totals.costUsd} />
+                <div className="grid grid-cols-3 gap-px bg-border lg:grid-cols-1">
+                  <Figure
+                    label="Billable"
+                    value={formatUsd(totals.billableUsd)}
+                    hint={`cost × ${formatNumber(usage.marginMultiplier, 2)}`}
+                  />
+                  <Figure
+                    label="Runs"
+                    value={formatNumber(totals.runs, 0)}
+                    hint={totals.runs > 0 ? `${formatUsd(totals.costUsd / totals.runs)} each` : "platform work only"}
+                  />
+                  <Figure
+                    label="Calls"
+                    value={formatNumber(totals.modelCalls + totals.toolCalls, 0)}
+                    hint={`${formatTokens(totals.inputTokens)} in · ${formatTokens(totals.outputTokens)} out`}
+                  />
+                </div>
+              </div>
+            </Card>
+
+            <Section
+              title="Day by day"
+              description="Model time stacked on tool fees, one bar per day. Hover a day for the split."
+            >
+              <Card>
+                <UsageChart byDay={usage.byDay} />
+              </Card>
             </Section>
 
-            <div className="grid gap-6 xl:grid-cols-2">
-              <Section title="By model" description="Every model that answered a call, with the tokens it read and wrote.">
-                <ModelCostTable rows={usage.byModel} totalCostUsd={totals.costUsd} />
-              </Section>
-              <Section title="By tool" description="Per-call fees for tools with a real backend; built-in tools are free.">
-                <ToolCostTable rows={usage.byTool} totalCostUsd={totals.costUsd} />
-              </Section>
-            </div>
+            <Section
+              title="By worker"
+              description="Who is spending what. Open a worker to see the same money run by run."
+            >
+              <WorkerCostTable rows={usage.byWorker} />
+            </Section>
+
+            <Section title="By model" description="Every model that answered, and the tokens it read and wrote.">
+              <ModelCostTable rows={usage.byModel} markSimulated={mixedSimulation} />
+            </Section>
+
+            <Section title="By tool" description="Per-call fees for tools with a real backend. Built-in tools are free.">
+              <ToolCostTable rows={usage.byTool} />
+            </Section>
           </>
         ) : (
-          <EmptyState
-            icon={ChartColumn}
-            title={`No usage in the last ${usage.days} days`}
-            description="Once a worker runs, every model call and tool fee lands here with what it cost and what it would bill."
-            action={
-              <>
-                {usage.days !== 90 ? (
-                  <Button variant="outline" asChild>
-                    <Link href="/usage?range=90">Look back 90 days</Link>
+          <Card>
+            <EmptyState
+              title="Nothing to report yet"
+              description={`No worker used a model or a tool in the last ${days} days. Once one runs, every call lands here with what it cost.`}
+              action={
+                <>
+                  <Button size="lg" asChild>
+                    <Link href="/workforce">Go to your workforce</Link>
                   </Button>
-                ) : null}
-                <Button asChild>
-                  <Link href="/workforce">Go to Workforce</Link>
-                </Button>
-              </>
-            }
-          />
+                  {usage.days !== 90 ? (
+                    <Button size="lg" variant="secondary" asChild>
+                      <Link href="/usage?range=90">Look back 90 days</Link>
+                    </Button>
+                  ) : null}
+                </>
+              }
+            />
+          </Card>
         )}
 
-        <BillingCard
-          marginMultiplier={usage.marginMultiplier}
-          costUsd={totals.costUsd}
-          billableUsd={totals.billableUsd}
-          simulatedMode={usage.simulatedMode}
-          simulatedShare={totals.simulatedShare}
-        />
+        <Section
+          title="How these numbers work"
+          description="Two amounts appear all over this page. Here is what each one means."
+        >
+          <BillingNote
+            marginMultiplier={usage.marginMultiplier}
+            costUsd={totals.costUsd}
+            billableUsd={totals.billableUsd}
+            simulatedMode={usage.simulatedMode}
+            simulatedShare={totals.simulatedShare}
+          />
+        </Section>
       </div>
-
-      {/* Runs in flight keep appending to the ledger; a slow refresh keeps the totals honest without flicker. */}
-      <AutoRefresh active={usage.hasUsage} intervalMs={15_000} />
     </>
   );
 }

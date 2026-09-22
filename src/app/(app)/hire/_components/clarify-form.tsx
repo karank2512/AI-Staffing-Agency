@@ -2,16 +2,17 @@
 
 import { useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { FileText, Loader2, MessageCircleQuestion } from "lucide-react";
+import { Check } from "lucide-react";
 import { toast } from "sonner";
 import type { FollowUpQuestion } from "@/server/domain";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { buildJobSpecAction } from "../actions";
 import { MAX_ANSWER_CHARS } from "../schema";
-import { DiscardJobButton } from "./discard-job-button";
+import { DiscardJobLink } from "./discard-job-button";
+import { InlineError, StepBar, stepLinkClass } from "./step-bar";
 
 export interface ClarifyFormProps {
   jobId: string;
@@ -19,13 +20,15 @@ export interface ClarifyFormProps {
   questions: FollowUpQuestion[];
   /** Answers saved on a previous visit (resume mid-flow). */
   initialAnswers: Record<string, string>;
+  /** MEMBERs can read the flow but cannot move it along — the server refuses jobs.manage either way. */
+  canManage: boolean;
 }
 
 /**
- * Step 2 — Clarify. Up to three follow-ups with a "why we ask" line and quick-pick suggestions. Every question can
- * be skipped: a blank answer is simply not sent. "Build job spec" drafts the spec and the server moves the step.
+ * Step 2 — Clarify. One question per card, each with selectable suggestion tiles and a free-text answer.
+ * Every question can be skipped: a blank answer is simply not sent.
  */
-export function ClarifyForm({ jobId, jobTitle, questions, initialAnswers }: ClarifyFormProps) {
+export function ClarifyForm({ jobId, jobTitle, questions, initialAnswers, canManage }: ClarifyFormProps) {
   const router = useRouter();
   const [answers, setAnswers] = useState<Record<string, string>>(() => ({ ...initialAnswers }));
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +44,7 @@ export function ClarifyForm({ jobId, jobTitle, questions, initialAnswers }: Clar
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (pending || overLimit) return;
+    if (pending || overLimit || !canManage) return;
     setError(null);
     startTransition(async () => {
       const result = await buildJobSpecAction(jobId, answers);
@@ -56,115 +59,116 @@ export function ClarifyForm({ jobId, jobTitle, questions, initialAnswers }: Clar
   }
 
   return (
-    <form onSubmit={submit} aria-busy={pending} className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <MessageCircleQuestion className="size-4 text-muted-foreground" aria-hidden="true" />
-            {questions.length > 0 ? "A few quick questions" : "No questions needed"}
-          </CardTitle>
-          <CardDescription>
-            {questions.length > 0
-              ? `They shape the spec for “${jobTitle}”. Skip anything you are unsure about — sensible defaults apply.`
-              : `“${jobTitle}” is clear enough to draft a spec straight away.`}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className={cn(questions.length > 0 && "divide-y")}>
-          {questions.map((question, index) => {
-            const value = answers[question.id] ?? "";
-            const skipped = value.trim().length === 0;
-            const tooLong = value.length > MAX_ANSWER_CHARS;
-            const inputId = `q-${question.id}`;
-            return (
-              <fieldset key={question.id} className="space-y-3 py-5 first:pt-0 last:pb-0">
-                <div className="flex items-start gap-3">
-                  <span
-                    aria-hidden="true"
-                    className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-semibold tabular-nums ring-1 ring-foreground/10 ring-inset"
-                  >
-                    {index + 1}
-                  </span>
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <label htmlFor={inputId} className="block text-sm font-medium text-foreground">
-                      {question.question}
-                    </label>
-                    {question.why ? <p className="text-[13px] text-muted-foreground">Why we ask: {question.why}</p> : null}
-                  </div>
-                  <span className={cn("shrink-0 text-xs", skipped ? "text-muted-foreground" : "text-emerald-600")}>
-                    {skipped ? "Optional" : "Answered"}
-                  </span>
-                </div>
-
-                {question.suggestions.length > 0 ? (
-                  <div className="flex flex-wrap gap-2 pl-9" role="group" aria-label="Suggested answers">
-                    {question.suggestions.map((suggestion) => {
-                      const selected = value.trim() === suggestion;
-                      return (
-                        <button
-                          key={suggestion}
-                          type="button"
-                          disabled={pending}
-                          aria-pressed={selected}
-                          onClick={() => setAnswer(question.id, selected ? "" : suggestion)}
-                          className={cn(
-                            "rounded-full border px-2.5 py-1 text-[13px] transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50",
-                            selected ? "border-primary/30 bg-primary/10 font-medium text-foreground" : "border-border bg-background text-foreground",
-                          )}
-                        >
-                          {suggestion}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
-
-                <div className="space-y-1 pl-9">
-                  <Textarea
-                    id={inputId}
-                    value={value}
-                    onChange={(e) => setAnswer(question.id, e.target.value)}
-                    placeholder={question.placeholder ?? "Type an answer, pick a suggestion, or leave blank to skip"}
-                    disabled={pending}
-                    aria-invalid={tooLong ? true : undefined}
-                    className="min-h-16"
-                  />
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <button
-                      type="button"
-                      onClick={() => setAnswer(question.id, "")}
-                      disabled={pending || skipped}
-                      className="underline-offset-2 hover:underline disabled:invisible"
-                    >
-                      Skip this question
-                    </button>
-                    {tooLong ? <span className="text-rose-600">Keep each answer under {MAX_ANSWER_CHARS.toLocaleString("en-US")} characters.</span> : null}
-                  </div>
-                </div>
-              </fieldset>
-            );
-          })}
-
-          {error ? (
-            <p role="alert" className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-              {error}
+    <form onSubmit={submit} aria-busy={pending} className="space-y-6">
+      {questions.length === 0 ? (
+        <Card>
+          <CardContent className="space-y-2">
+            <h2 className="text-title-3">Nothing to ask</h2>
+            <p className="text-callout text-pretty text-muted-foreground">
+              “{jobTitle}” is clear enough to draft a spec straight away.
             </p>
-          ) : null}
-        </CardContent>
-        <CardFooter className="flex-wrap justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <DiscardJobButton jobId={jobId} disabled={pending} />
-            {questions.length > 0 ? (
-              <span className="text-xs text-muted-foreground metric">
-                {answered} of {questions.length} answered
-              </span>
-            ) : null}
-          </div>
-          <Button type="submit" disabled={pending || overLimit}>
-            {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <FileText aria-hidden="true" />}
-            {pending ? "Drafting the spec…" : "Build job spec"}
-          </Button>
-        </CardFooter>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {questions.map((question, index) => {
+        const value = answers[question.id] ?? "";
+        const skipped = value.trim().length === 0;
+        const tooLong = value.length > MAX_ANSWER_CHARS;
+        const inputId = `q-${question.id}`;
+        return (
+          <Card key={question.id}>
+            <CardContent className="space-y-5">
+              <div className="space-y-1.5">
+                <p className="text-footnote text-muted-foreground">
+                  <span className="metric">
+                    Question {index + 1} of {questions.length}
+                  </span>
+                  {skipped ? null : " · answered"}
+                </p>
+                <label htmlFor={inputId} className="block text-title-3 text-balance text-foreground">
+                  {question.question}
+                </label>
+                {question.why ? <p className="text-callout text-pretty text-muted-foreground">{question.why}</p> : null}
+              </div>
+
+              {question.suggestions.length > 0 ? (
+                <div className="grid gap-2 sm:grid-cols-2" role="group" aria-label="Suggested answers">
+                  {question.suggestions.map((suggestion) => {
+                    const selected = value.trim() === suggestion;
+                    return (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        disabled={pending || !canManage}
+                        aria-pressed={selected}
+                        onClick={() => setAnswer(question.id, selected ? "" : suggestion)}
+                        className={cn(
+                          "relative min-h-11 rounded-[14px] border border-input bg-background px-4 py-2.5 pr-10 text-left text-callout text-pretty",
+                          "transition-[border-color,background-color,box-shadow] duration-200 ease-standard outline-none",
+                          "hover:bg-muted focus-visible:ring-4 focus-visible:ring-primary/30 disabled:opacity-40",
+                          selected && "border-primary bg-background shadow-[inset_0_0_0_1px_var(--primary)] hover:bg-background",
+                        )}
+                      >
+                        {suggestion}
+                        {selected ? (
+                          <Check className="absolute top-3 right-3.5 size-4 text-primary" aria-hidden="true" />
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              <div className="space-y-2">
+                <Textarea
+                  id={inputId}
+                  value={value}
+                  onChange={(e) => setAnswer(question.id, e.target.value)}
+                  placeholder={question.placeholder ?? "Type an answer, pick a suggestion, or leave it blank"}
+                  disabled={pending || !canManage}
+                  aria-invalid={tooLong ? true : undefined}
+                  className="min-h-20"
+                />
+                <div className="flex items-center justify-between gap-3 text-footnote text-muted-foreground">
+                  <button
+                    type="button"
+                    onClick={() => setAnswer(question.id, "")}
+                    disabled={pending || skipped || !canManage}
+                    className={cn(stepLinkClass, "font-normal disabled:invisible")}
+                  >
+                    Clear this answer
+                  </button>
+                  {tooLong ? <span className="text-danger">Keep it under {MAX_ANSWER_CHARS.toLocaleString("en-US")} characters.</span> : null}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+
+      {error ? <InlineError>{error}</InlineError> : null}
+
+      <StepBar
+        note={
+          canManage ? (
+            <>
+              {questions.length > 0 ? (
+                <span className="metric">
+                  {answered} of {questions.length} answered.{" "}
+                </span>
+              ) : null}
+              Anything you skip gets a sensible default. <DiscardJobLink jobId={jobId} disabled={pending} />
+            </>
+          ) : (
+            "Only workspace admins and owners can change a job."
+          )
+        }
+      >
+        <Button type="submit" size="lg" disabled={pending || overLimit || !canManage} className="max-sm:w-full">
+          {pending ? "Drafting the spec…" : "Draft the job spec"}
+        </Button>
+      </StepBar>
     </form>
   );
 }

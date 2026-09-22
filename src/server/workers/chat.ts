@@ -1,10 +1,12 @@
 import type { MessageClassification, MessageRole, Prisma } from "@prisma/client";
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import { MessageClassificationSchema, type MessageClassificationResult } from "@/server/domain";
 import { conflict, invalid } from "@/server/errors";
 import { llm, type ChatMessage } from "@/server/models";
+import { assertOrgActive, assertWithinBudget } from "@/server/security";
 import { buildChatContext, renderContextForPrompt, type WorkerChatContext } from "./chat-context";
 import { mockClassify, mockQuestionReply, normalizeInstruction, specChangeReply, temporaryInstructionReply } from "./chat-mock";
 import { deriveSpecChange } from "./chat-spec-change";
@@ -131,6 +133,9 @@ async function persistExchange(args: {
 }
 
 export async function sendMessageToWorker(s: SessionContext, workerId: string, content: string): Promise<SendMessageResult> {
+  assertCan(s, "workers.chat");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const message = content.trim();
   if (message.length === 0) throw invalid("Write a message first");
   if (message.length > MAX_MESSAGE_CHARS) throw invalid(`Messages are at most ${MAX_MESSAGE_CHARS.toLocaleString("en-US")} characters`);

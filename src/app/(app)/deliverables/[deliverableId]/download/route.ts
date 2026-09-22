@@ -2,13 +2,31 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/server/auth";
 import { isAppError } from "@/server/errors";
 import { getDeliverableFile } from "@/server/queries/deliverables";
+import { DOWNLOAD_CSP, publicErrorMessage } from "@/server/security";
 
 /**
  * GET /deliverables/[deliverableId]/download — the deliverable's content as a file (markdown / CSV / JSON).
  * Org-scoped through the query; a foreign id is a 404 like everywhere else.
+ *
+ * The file is worker output, so the response is served inert: `nosniff` (a .md that looks like HTML must not
+ * be rendered as HTML), a deny-everything CSP, and `private, no-store` so a shared proxy never caches one
+ * tenant's deliverable (F-015, INF-06).
  */
 
 export const dynamic = "force-dynamic";
+
+/** Windows/macOS-safe ASCII fallback; the RFC 5987 `filename*` carries the real one for modern browsers. */
+function asciiFilename(filename: string): string {
+  const ascii = filename
+    .replace(/[^\x20-\x7e]/g, "")
+    .replace(/["\\/:*?<>|]/g, "-")
+    .trim();
+  return ascii === "" ? "deliverable" : ascii.slice(0, 120);
+}
+
+function contentDisposition(filename: string): string {
+  return `attachment; filename="${asciiFilename(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
 
 export async function GET(_request: Request, ctx: { params: Promise<{ deliverableId: string }> }) {
   const session = await getSession();
@@ -21,16 +39,17 @@ export async function GET(_request: Request, ctx: { params: Promise<{ deliverabl
       status: 200,
       headers: {
         "Content-Type": file.contentType,
-        // The filename is a slug (ASCII only) so no RFC 5987 encoding is needed.
-        "Content-Disposition": `attachment; filename="${file.filename}"`,
-        "Cache-Control": "no-store",
+        "Content-Disposition": contentDisposition(file.filename),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": DOWNLOAD_CSP,
+        "Cache-Control": "private, no-store",
       },
     });
   } catch (e) {
     if (isAppError(e) && e.code === "NOT_FOUND") {
       return NextResponse.json({ error: "Deliverable not found", code: "NOT_FOUND" }, { status: 404 });
     }
-    console.error("[deliverables/download] failed", e);
-    return NextResponse.json({ error: "Something went wrong", code: "INTERNAL" }, { status: 500 });
+    const { ref } = publicErrorMessage(e);
+    return NextResponse.json({ error: "Something went wrong", code: "INTERNAL", ref }, { status: 500 });
   }
 }

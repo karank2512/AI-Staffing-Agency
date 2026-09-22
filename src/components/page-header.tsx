@@ -1,13 +1,5 @@
-import { Fragment, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
 import { cn } from "@/lib/utils";
 
 export interface BreadcrumbEntry {
@@ -17,53 +9,68 @@ export interface BreadcrumbEntry {
 }
 
 export interface PageHeaderProps {
-  /** Page title. A string in most cases; a node when the title carries an avatar or badge. */
+  /** Page title. A string in most cases; a node when the title carries an avatar or a status line. */
   title: ReactNode;
   /** One sentence of orientation under the title. */
   description?: ReactNode;
-  /** Right-aligned controls. Put the single primary `<Button>` last; everything else `variant="outline"`. */
+  /** Right-aligned controls: at most one primary pill plus one secondary; the rest go in a "…" menu. */
   actions?: ReactNode;
-  /** Trail above the title for detail pages: `[{ label: "Workforce", href: "/workforce" }, { label: "Alex" }]`. */
+  /** Where "‹ Back" points. Replaces breadcrumbs on detail pages. */
+  backHref?: string;
+  /** Label for the back link. Defaults to the parent breadcrumb, then "Back". */
+  backLabel?: string;
+  /**
+   * Legacy trail. Only the parent is rendered, as "‹ Parent" — deep pages that genuinely need two levels pass
+   * three entries and get "Workforce › Alex" above the title.
+   */
   breadcrumbs?: BreadcrumbEntry[];
   className?: string;
 }
 
-/** First element of every page. Owns the only `<h1>` and the spacing to the content below it. */
-export function PageHeader({ title, description, actions, breadcrumbs, className }: PageHeaderProps) {
+/** First element of every page. Owns the only `<h1>` and the 40px of air between it and the content. */
+export function PageHeader({
+  title,
+  description,
+  actions,
+  backHref,
+  backLabel,
+  breadcrumbs,
+  className,
+}: PageHeaderProps) {
+  const trail = breadcrumbs?.filter((c) => c.href) ?? [];
+  const parent = trail[trail.length - 1];
+  const href = backHref ?? parent?.href;
+  const label = backLabel ?? parent?.label ?? "Back";
+  // Two-level trails ("Workforce › Alex") only earn their space when the page is genuinely nested twice.
+  const deep = trail.length > 1 ? trail : null;
+
   return (
-    <header data-slot="page-header" className={cn("mb-6 flex flex-col gap-3", className)}>
-      {breadcrumbs && breadcrumbs.length > 0 ? (
-        <Breadcrumb>
-          <BreadcrumbList className="gap-1 text-[13px] sm:gap-1.5">
-            {breadcrumbs.map((crumb, index) => {
-              const isLast = index === breadcrumbs.length - 1;
-              return (
-                <Fragment key={`${crumb.label}-${index}`}>
-                  <BreadcrumbItem>
-                    {crumb.href && !isLast ? (
-                      <BreadcrumbLink asChild>
-                        <Link href={crumb.href}>{crumb.label}</Link>
-                      </BreadcrumbLink>
-                    ) : (
-                      <BreadcrumbPage className="max-w-[28ch] truncate">{crumb.label}</BreadcrumbPage>
-                    )}
-                  </BreadcrumbItem>
-                  {isLast ? null : <BreadcrumbSeparator />}
-                </Fragment>
-              );
-            })}
-          </BreadcrumbList>
-        </Breadcrumb>
+    <header data-slot="page-header" className={cn("mb-10 flex flex-col gap-3", className)}>
+      {deep ? (
+        <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-footnote text-muted-foreground">
+          {deep.map((crumb, index) => (
+            <span key={`${crumb.label}-${index}`} className="flex items-center gap-1.5">
+              {index > 0 ? <span aria-hidden="true">›</span> : null}
+              <Link href={crumb.href ?? "#"} className="rounded-sm text-link outline-none hover:underline">
+                {crumb.label}
+              </Link>
+            </span>
+          ))}
+        </nav>
+      ) : href ? (
+        <Link href={href} className="w-fit rounded-sm text-callout text-link outline-none hover:underline">
+          ‹ {label}
+        </Link>
       ) : null}
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
-        <div className="min-w-0 space-y-1">
-          <h1 className="text-xl leading-7 font-semibold tracking-tight text-balance text-foreground">{title}</h1>
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+        <div className="min-w-0 space-y-2">
+          <h1 className="text-title-1 text-balance text-foreground">{title}</h1>
           {description ? (
-            <p className="max-w-2xl text-sm text-pretty text-muted-foreground">{description}</p>
+            <p className="text-body max-w-[65ch] text-pretty text-muted-foreground">{description}</p>
           ) : null}
         </div>
-        {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+        {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2.5">{actions}</div> : null}
       </div>
     </header>
   );

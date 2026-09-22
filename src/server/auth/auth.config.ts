@@ -1,5 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
 import { NextResponse } from "next/server";
+import { config } from "@/server/config";
 import { SIGN_IN_PATH, decideAccess } from "./access";
 
 /**
@@ -9,7 +10,13 @@ import { SIGN_IN_PATH, decideAccess } from "./access";
  */
 export const authConfig = {
   pages: { signIn: SIGN_IN_PATH },
-  session: { strategy: "jwt" },
+  session: {
+    strategy: "jwt",
+    /** Sliding window: an idle cookie stops working after this long. */
+    maxAge: config.auth.sessionMaxAgeSec,
+    /** How often an active session's cookie is re-issued. */
+    updateAge: config.auth.sessionUpdateAgeSec,
+  },
   providers: [],
   callbacks: {
     /** Middleware gate — routing rules live in `access.ts`. */
@@ -31,12 +38,23 @@ export const authConfig = {
       }
     },
 
-    /** `user` is only present on sign-in: persist the identity onto the token once. */
+    /**
+     * `user` is only present on sign-in: persist the identity onto the token once, together with the
+     * revocation counter and the moment credentials were presented.
+     *
+     * Returning `null` clears the session in Auth.js v5 — that is how the ABSOLUTE lifetime is enforced:
+     * `maxAge` alone only measures idleness, so an active tab could otherwise renew forever.
+     */
     jwt({ token, user }) {
       if (user?.id) {
         token.userId = user.id;
         token.organizationId = user.organizationId;
         token.role = user.role;
+        token.sv = user.sessionVersion;
+        token.authAt = Math.floor(Date.now() / 1000);
+      }
+      if (typeof token.authAt === "number" && Date.now() / 1000 - token.authAt > config.auth.sessionAbsoluteMaxSec) {
+        return null;
       }
       return token;
     },
@@ -50,6 +68,8 @@ export const authConfig = {
         session.user.id = token.userId;
         session.user.organizationId = token.organizationId;
         session.user.role = token.role;
+        // Left undefined for pre-upgrade cookies; loadSessionContext then treats the session as stale.
+        if (typeof token.sv === "number") session.user.sessionVersion = token.sv;
       }
       return session;
     },

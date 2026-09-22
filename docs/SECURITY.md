@@ -1,86 +1,159 @@
-# Security & Production Readiness
+# Security
 
-Principle: **treat every AI worker as an untrusted contractor, and every client input (including LLM output) as hostile.** No control relies on a system prompt. Server-side enforcement only.
+Principle: **treat every AI worker as an untrusted contractor, and every input — including model output, fetched web pages and anything a client sends — as hostile.** No control relies on a system prompt. Every rule is enforced server-side, inside the module that owns the data.
+
+This document describes what is *implemented*, with file pointers, plus the runbooks and the risks we are knowingly carrying. Audit finding ids (`F-…`, `INF-…`, `OPS-…`) refer to the production-readiness audits for this phase.
+
+---
 
 ## 1. Threat model
 
-Assets: tenant business data (jobs, deliverables, run history), credentials/API keys, model spend (money), platform integrity.
+**Assets.** Tenant business data (jobs, specs, deliverables, run traces, chat), stored tool credentials, model spend (real money on platform keys), and platform integrity/availability.
 
-Adversaries & vectors:
+**Trust boundaries.**
 
-- **External attacker (unauthenticated):** credential stuffing, session forgery, IDOR probing, endpoint scraping, DoS on expensive LLM endpoints.
-- **Authenticated tenant (malicious or compromised):** cross-tenant access via id guessing, cost abuse, injection via job descriptions/chat, arbitrary tool invocation attempts.
-- **Hostile web content (indirect prompt injection):** fetched pages/search results instructing the agent to exfiltrate data, call unauthorized tools, or poison deliverables.
-- **The worker itself (excessive agency):** runaway loops, unbounded spend, unintended side effects.
-- **Supply chain / operator error:** leaked secrets, vulnerable dependencies, misconfigured headers.
+| Boundary | Crossing | Treated as |
+|---|---|---|
+| Browser → app | Server actions, route handlers, Auth.js | Hostile input; session identity is re-read from the database on every request |
+| App → model provider | `src/server/models/**` only | Untrusted output; nothing it returns is an instruction |
+| Model → tools | `tools.invoke()` only | Every call re-authorized against the worker version's grants |
+| Tool → internet | `src/server/tools/net-guard.ts`, `guarded-http.ts` | SSRF-hostile; addresses re-checked at connect time |
+| Web page → model context | `fetch_url` / `web_search` output | Data, never instructions (indirect prompt injection) |
 
-## 2. Authentication & session
+**Adversaries.**
 
-- Auth.js v5 credentials provider; passwords hashed with **bcrypt cost 12**; constant-time comparison (bcrypt native); identical error message for unknown-user vs wrong-password (no user enumeration).
-- JWT session cookies: `httpOnly`, `sameSite=lax`, `secure` in production, 30-day max age with rolling refresh; session payload carries `userId`, `organizationId`, `role` — resolved server-side at issue time, never trusted from the client afterward for authorization decisions beyond identity.
-- `middleware.ts` gates all `(app)` and `/api` routes (except auth + health); unauthenticated → redirect/401.
-- Login endpoint rate-limited (per-IP + per-email token bucket: 5 attempts/min, backoff). CSRF on auth routes handled by Auth.js; server actions get Next.js origin/host verification (enabled by default) — we additionally set `allowedOrigins` explicitly.
-- Phase 2: optional TOTP 2FA, OAuth (Google/Microsoft), org invitations with signed, expiring tokens, session revocation list.
+- *Unauthenticated attacker*: credential stuffing, session forgery, IDOR probing, DoS on expensive endpoints.
+- *Authenticated tenant (malicious or compromised)*: cross-tenant reads, cost abuse, privilege escalation inside the workspace.
+- *Hostile web content*: a page that tells the worker to exfiltrate what it has collected, or to poison a deliverable.
+- *The worker itself (excessive agency)*: runaway loops, unbounded spend, unintended external side effects.
+- *Operator error / supply chain*: leaked keys, vulnerable dependencies, a misconfigured deployment.
 
-## 3. Authorization & tenant isolation
+---
 
-- Every query/mutation scoped by `organizationId` from `requireSession()` — **never from request payload**. Child resources verified through the parent chain in a single `where { id, organizationId }`; mismatch → `notFound()` (404, not 403 — no existence oracle).
-- All ids are `cuid()` — non-sequential, non-enumerable.
-- Role model (owner/admin/member) exists from day 1; MVP enforces membership; destructive ops (terminate worker, resolve approvals) require admin+ in Phase 2 RBAC tightening.
-- No client-side authorization: UI hides what you can't do, server rejects what you may not do.
-- Automated test coverage: cross-tenant access attempts for every query helper and action must return not-found (see TESTING.md).
+## 2. Controls
 
-## 4. Tool-layer security (the core of "AI worker as untrusted contractor")
+### 2.1 Identity and sessions
 
-- **Single choke point:** `tools.invoke()` is the only execution path. It (1) loads the `WorkerToolGrant` for the exact WorkerVersion, (2) rejects non-granted tools — even if the LLM asks, (3) Zod-parses args against the tool's schema (unknown keys stripped, sizes bounded), (4) enforces approval gates, (5) records an immutable `ToolCall` audit row. UI/runtime never call a tool's `execute()` directly.
-- **Approval gates:** side-effectful tools (`send_email`, future CRM writes) default `requiresApproval: true`; the run pauses (`waiting_approval`), a human approves/rejects with the exact proposed payload displayed; approvals expire (24h → run fails safe).
-- **SSRF defense** (`tools/http-guard.ts`) for `fetch_url` / future `http_request`: scheme allowlist (http/https), DNS-resolve then block private/reserved ranges (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16 incl. cloud metadata 169.254.169.254, ::1, fc00::/7), block localhost aliases, cap redirects (3, re-validated per hop), response size cap (2 MB), timeout (10 s), text content-types only.
-- **No dynamic execution:** no `eval`, no `Function()`, no shelling out; `calculator` uses a hand-rolled safe expression parser over numbers/operators only.
-- **Output-side injection safety:** CSV generation escapes `= + - @ \t` cell prefixes (formula injection); deliverable markdown rendered with a sanitizing renderer (no raw HTML pass-through, no `dangerouslySetInnerHTML` of model output); JSON deliverables rendered as data, never executed.
-- Tool results are size-capped and schema-validated before re-entering model context.
+- Auth.js v5 credentials provider; bcrypt (cost `config.auth.bcryptRounds`), identical failure message for unknown-user and wrong-password, and a timing-equalizer hash so a missing account costs the same as a wrong password — `src/server/auth/authorize.ts`.
+- JWT sessions: 12 h sliding, 7 d absolute, `sessionVersion` in the token. `loadSessionContext` re-reads the user on every request and rejects a token whose `sessionVersion` is behind, or whose user is disabled — `src/server/auth/session-context.ts`. A password change, "sign out everywhere", a role change or a removal bumps it, which revokes every existing cookie.
+- Sign-in throttling and lockouts (F-002): 5 failures / 15 min per `sha256(email)` and 30 / 15 min per client IP, then an exponential lockout (window × 2^n, capped at 24 h). Both are checked *before* the password compare, and the account rule is applied whether or not the account exists, so lockouts are not an account oracle — `src/server/security/rate-limit.ts` + `src/server/auth/authorize.ts`.
+- Self-serve sign-up is gated by `SIGNUP_MODE` (`open` / `invite` / `closed`, closed by default in production). Invitations are single-use, expiring, and stored as `sha256(token)` — `src/server/account/**`.
+- The demo workspace is refused at sign-in unless `DEMO_MODE=true` (F-001).
 
-## 5. LLM-specific security (OWASP LLM Top 10 mapping)
+### 2.2 Authorization and tenant isolation
 
-- **LLM01 Prompt injection:** fetched web/search content is demarcated as untrusted data in prompts; tool allowlists + grants are enforced server-side, so injected "instructions" cannot expand capability; structured outputs Zod-validated; agent never sees or handles secrets.
-- **LLM02 Insecure output handling:** every model output parsed/validated before use (`generateObject` + schema; free text sanitized at render). Model output never becomes SQL, shell, HTML, or tool args without validation.
-- **LLM04 Model DoS / cost abuse:** hard budgets per run (max steps/model calls/tool calls/tokens/wall-clock from blueprint), per-org concurrency cap and daily USD cap (org settings, enforced at enqueue + per model call), rate limits on scoping/chat/run-now actions.
-- **LLM06 Sensitive info disclosure:** provider keys and credentials never enter model context or client bundles; prompts contain only job-scoped data; no cross-tenant data in any context assembly (queries all org-scoped).
-- **LLM08 Excessive agency:** grants + approval gates + budgets as above; workers cannot self-modify configuration (version immutability; improvement proposals require human approval).
-- **LLM09 Overreliance:** deterministic + judge evaluations, acceptance workflow, "Simulated" and confidence labeling; reviews surface degradation instead of silently trusting output.
-- **No chain-of-thought exposure:** we store structured decisions and humanized summaries only.
+- Every query and mutation is scoped by `organizationId` taken from the session, never from the request. A child resource is verified through `where: { id, organizationId }`; a mismatch is `NOT_FOUND`, never `FORBIDDEN` — no existence oracle. Ids are `cuid()`.
+- Roles (MEMBER / ADMIN / OWNER) are enforced inside the server modules with `assertCan(session, permission)` — `src/server/auth/permissions.ts`. The UI only *hides* what you may not do; the server *refuses* it. Deciding an approval for an `external_write` tool re-reads the deciding user's role from the database.
+- Route handlers answer `401`/`404` JSON instead of redirecting, and never leak whether an id exists in another workspace — `src/app/api/runs/[runId]/route.ts`, `src/app/(app)/deliverables/[deliverableId]/download/route.ts`.
 
-## 6. Application & platform hardening
+### 2.3 Rate limits, spend caps and the kill switch
 
-- **Input validation:** Zod at every boundary — server actions, route handlers, tool args, LLM outputs, env vars (`config.ts` fails fast on invalid env).
-- **Security headers** (middleware/`next.config.ts`): CSP (`default-src 'self'`; Next-compatible script/style policy; `frame-ancestors 'none'`; `object-src 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` minimal, HSTS in production.
-- **Rate limiting:** in-memory token buckets per org+IP on login, job scoping, run-now, chat, replacement (the LLM-spend endpoints). Upgrades to Redis/Upstash in Phase 2 for multi-instance.
-- **Secrets:** `.env` gitignored; `.env.example` documents every var; no `NEXT_PUBLIC_` secret leakage (lint check); Credential vault rows encrypted AES-256-GCM with `APP_ENCRYPTION_KEY` (32-byte, env-provided), IV+authTag per row; masked rendering only.
-- **Downloads:** deliverable download route sets explicit `Content-Type`, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`; content served from DB (no user-controlled paths — no traversal surface).
-- **Error hygiene:** `AppError` codes → generic client messages; stack traces and internals only in server logs; 404 for both missing and unauthorized.
-- **Dependency hygiene:** pinned stack, lockfile committed, `npm audit` (high+) in CI, no post-install scripts from untrusted packages, minimal dependency surface.
-- **DB safety:** Prisma parameterized queries only (raw SQL confined to the documented queue claim, parameter-free); least-privilege DB user in production (no DDL at runtime); TLS to managed Postgres in Phase 2.
+- One Postgres-backed fixed-window limiter (`RateLimitBucket`), one atomic `INSERT … ON CONFLICT DO UPDATE` per hit, so counts are correct across instances and concurrent requests — `src/server/security/rate-limit.ts`. Rules: sign-in (account/IP), sign-up, invite accept/create, password change, LLM per user and per org, runs per org, credentials per org, and the run-page poll endpoint (429 + `Retry-After`).
+- Failure policy: **auth rules fail closed**, everything else fails open and logs. The whole limiter is a no-op when `RATE_LIMIT_DISABLED=1` (refused in production by `env.ts`).
+- Monthly **real** spend per workspace is tracked in `OrgSpendMonth` (UTC month, atomic increment) and enforced against `Organization.monthlyBudgetUsd ?? PLATFORM_DEFAULT_MONTHLY_BUDGET_USD` — `src/server/security/budget.ts`. Simulated runs cost nothing and are never blocked.
+- `assertOrgActive` is the operator kill switch (`Organization.suspendedAt`): no runs, no LLM calls.
+- Both checks are repeated as a backstop immediately before every LIVE model call, so a code path that forgets them still cannot spend — `src/server/models/index.ts`.
+- Per-run ceilings (cost, tool calls, duration) are clamped to platform maxima by `clampRunLimits`, and per-worker/per-org in-flight run caps live in the runtime queue.
 
-## 7. Auditability
+### 2.4 The worker as an untrusted contractor
 
-- Append-only `ActivityEvent` + immutable `ToolCall`/`ModelCall`/`Approval` rows = full who/what/when for every worker action, human approval, and configuration change (version history with `changeSummary`).
-- Debug trace view is org-scoped and permission-checked like all other data.
+- **Single choke point.** `tools.invoke()` is the only execution path: registry lookup → Zod validation → `authorize` (tool in the blueprint *and* a non-revoked grant for this worker version) → approval check by `toolCallId` → execute → usage record. The runtime and the UI never call a tool's `execute()` — `src/server/tools/invoke.ts`.
+- **Approvals.** `send_notification` (`sideEffect: "external_write"`) defaults to requiring approval; the run pauses and a human sees the exact payload. Only an `APPROVED` row for *that* `ToolCall` in *that* workspace lets it run; `PENDING`, `REJECTED`, `EXPIRED` and "no row" all refuse. Regression test: `tests/security/tool-provenance.test.ts`.
+- **SSRF.** Scheme and port allow-lists, DNS resolution with private/reserved/metadata ranges blocked, redirects capped and re-validated per hop, and the *connection* re-checked at connect time so DNS rebinding cannot reach a blocked address — `src/server/tools/net-guard.ts`, `guarded-http.ts`.
+- **Exfiltration via `fetch_url` (F-010).** In live mode a URL is capped at 2,048 characters, its fragment is stripped, and the host must have *provenance* in this run: it appeared in this run's own `web_search` results, or literally in the job brief / spec / this run's instructions. Anything else is refused with a `TOOL_ERROR` telling the model to search first — `src/server/tools/provenance.ts`. Simulated mode is unaffected.
+- **No dynamic execution.** No `eval`, no `Function()`, no shelling out; `calculator` is a hand-written expression parser.
+- **Bounded context.** Tool outputs are size-capped and schema-validated before re-entering the model context; trace payloads are clipped field-by-field.
 
-## 8. Production-readiness checklist (Phase 2 exit gate)
+### 2.5 Output safety
 
-Baseline delivered in Phase 1 (marked ✅ when built), the rest are Phase 2 launch blockers:
+- Markdown is parsed into an AST and rendered as React elements — no HTML string is ever produced, no `dangerouslySetInnerHTML`, and link targets are restricted to `http(s)`, `mailto:` and same-site paths — `src/lib/markdown.ts`, `src/components/markdown.tsx`.
+- The parser is hardened against pathological input (INF-17): no quadratic regexes, bounded look-ahead and recursion, a 2,000-character per-line block-scan limit and a 200 KB document cap. Regression tests assert a time budget on adversarial input — `tests/security/markdown.test.ts`.
+- CSV output escapes formula prefixes (`= + - @`, tab, CR).
+- Deliverable downloads are served inert: `nosniff`, `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: private, no-store`, and a sanitized ASCII `filename` plus RFC 5987 `filename*` — `src/app/(app)/deliverables/[deliverableId]/download/route.ts`.
 
-- Phase 1: all of sections 2–7 above except where noted "Phase 2"; health endpoint; graceful executor shutdown; seeded-demo credentials documented as demo-only.
-- [ ] Hosted TLS + HSTS preload; secrets in platform secret manager (Vercel/Neon), rotated quarterly
-- [ ] Managed Postgres with PITR backups + restore drill; connection pooling (pgBouncer)
-- [ ] Distributed rate limiting (Upstash); WAF/bot protection at edge; request-id structured logging
-- [ ] Error monitoring (Sentry) + uptime alerts + spend-anomaly alerts (daily USD per org vs baseline)
-- [ ] Queue moved to Inngest/Trigger.dev with dead-letter handling and idempotency keys
-- [ ] 2FA, org invites, session revocation, admin-gated destructive actions
-- [ ] Dependency scanning (Dependabot) + CI security gates; `npm audit` clean at high severity
-- [ ] Pen-test pass on tenant isolation + SSRF + IDOR (scripted attack suite in CI, external test pre-launch)
-- [ ] Data processing inventory + privacy policy + DPA template (design partners); SOC 2 controls mapped (Type I track)
-- [ ] Incident response runbook (see OPERATIONS.md): sev levels, key rotation, tenant notification
+### 2.6 Browser and transport
 
-## 9. Explicit non-claims (honesty ledger)
+- Static headers on every response (HSTS in production, `nosniff`, `X-Frame-Options: DENY`, referrer, permissions, COOP, CORP, no `X-Powered-By`) — `next.config.ts`.
+- A per-request nonce-based **Content-Security-Policy** with `strict-dynamic`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `frame-ancestors 'none'` and `upgrade-insecure-requests` in production — `src/server/security/csp.ts` + `src/middleware.ts`. Redirect and 401 responses get an inert deny-all policy. `style-src` keeps `'unsafe-inline'` because React SSR emits style attributes and the toast library injects a stylesheet; there is no raw-HTML rendering path, so that residual is small.
+- Server actions: Next.js origin checking (do not add a wildcard `SERVER_ACTIONS_ALLOWED_ORIGINS`) plus a 256 KB body limit. Every export of a `"use server"` file is a public endpoint, so `tests/security/server-actions.test.ts` asserts that each one is an async function that starts from `requireSession()` (with a named allow-list for sign-in, sign-up, invite acceptance and sign-out), and that route handlers export `GET` only (F-017).
 
-MVP is a locally run demo: credentials auth with a seeded demo user, in-memory rate limits (single process), no TLS on localhost, no formal pen test yet. It is architected so that Phase 2 hardening is configuration and swaps — not redesign. "No one can hack into it" is approached as: minimized attack surface, defense in depth, verified tenant isolation, and a tested path to the production checklist above — never as a marketing absolute.
+### 2.7 Secrets
+
+- Tool credentials are encrypted with AES-256-GCM under `CREDENTIAL_ENCRYPTION_KEY`. The envelope is `v2:<kid>:<iv>:<tag>:<ciphertext>`, where `kid` identifies the key and the GCM **AAD binds the ciphertext to `organizationId:name`** — moving a row to another workspace or renaming it makes it undecryptable (F-014) — `src/server/secrets/crypto.ts`.
+- Values are never logged, never returned by any list endpoint, and `last4` is only kept for values of 12+ characters.
+- A credential that cannot be decrypted does **not** fall back to the platform env key (that would silently spend the platform's own key): the tool drops to Simulated mode and the operator sees `secrets.unreadable_credential` — `src/server/secrets/vault.ts`.
+- `setCredential` / `deleteCredential` require `credentials.manage` (ADMIN), are rate limited per workspace, and write `CREDENTIAL_SET` / `CREDENTIAL_DELETED` audit events carrying the credential *name* only.
+- Model-provider keys are process-wide environment variables, never per-tenant in Phase 1. `env.ts` refuses to boot in production with a missing/weak `AUTH_SECRET`, a bad `CREDENTIAL_ENCRYPTION_KEY`, a non-HTTPS `AUTH_URL` or a database URL without TLS.
+
+### 2.8 Audit trail and logging hygiene
+
+- `SecurityEvent` records sign-ins, throttles, lockouts, sign-outs, password and role changes, invitations, credential changes, rate-limit blocks and budget stops. It stores `sha256(email)` — never the address — the client IP, a 256-character user agent, and metadata with secret-looking keys and values scrubbed — `src/server/security/audit.ts`. `recordSecurityEvent` never throws.
+- The client IP is read from the **right** of `X-Forwarded-For` using `TRUSTED_PROXY_HOPS`, never the leftmost (client-controlled) value — `src/server/security/request.ts`.
+- Logs are structured JSON lines with clipped, `redactSecrets`-scrubbed fields; error *objects* are never logged whole (Prisma metadata can contain row values) — `src/server/security/log.ts`, `redact.ts`.
+- Tenant-facing errors never carry internals: `runAction` passes through only the AppError codes whose message is written for users, and turns everything else into one generic sentence plus a `(ref xxxxxx)` that appears in the log line — `src/lib/action-result.ts`, `src/server/security/public-error.ts`. Provider text (request ids, echoed prompts, keys) stays in `ModelCall.error` and `AppError.details`, scrubbed.
+
+### 2.9 Retention
+
+`RETENTION_TRACE_DAYS` (default 30) clears `ModelCall` request/response payloads; `RETENTION_EVENTS_DAYS` (default 365) deletes activity and security events; rate-limit buckets idle for two days are swept (`sweepRateLimits`). The maintenance tick runs them — `src/server/maintenance/**`.
+
+---
+
+## 3. Runbooks
+
+### 3.1 Rotating `CREDENTIAL_ENCRYPTION_KEY`
+
+1. Generate a key: `openssl rand -base64 32`.
+2. Deploy with `CREDENTIAL_ENCRYPTION_KEY=<new>` **and** `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS=<old>`. Both old (`v1`/`v2`) and new rows decrypt; new writes use the new key.
+3. Re-encrypt every stored credential: `reencryptAll()` from `@/server/secrets` (idempotent, batched; rows already on the active key are skipped). It reports `{ scanned, reencrypted, failed }`.
+4. Confirm `failed === 0`, then remove `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS` and redeploy. Any `failed` row must be re-entered by a workspace admin in Settings.
+5. Keep an offline escrow copy of the key, separate from database backups — losing it means losing every stored credential.
+
+### 3.2 Rotating `AUTH_SECRET`
+
+Deploy with the new secret; Auth.js accepts an array, so keep the previous value in `AUTH_SECRET_PREVIOUS` for one release to avoid signing everyone out, then drop it. To force a global sign-out instead, increment every `User.sessionVersion`.
+
+### 3.3 Suspending a workspace / stopping spend
+
+`UPDATE "Organization" SET "suspendedAt" = now() WHERE id = '…';` — runs stop being claimed, LLM calls refuse, the UI explains why. To cap instead of stop, set `monthlyBudgetUsd`.
+
+### 3.4 Incident response
+
+1. **Contain.** Suspend the affected workspace (3.3). For a suspected credential compromise, delete the credential and rotate the provider key at the provider.
+2. **Revoke sessions.** Increment `sessionVersion` for the affected users (all sessions for that user stop on their next request).
+3. **Assess.** `listSecurityEvents(organizationId)` for the actor's trail (sign-ins, IPs, credential and role changes); `ModelCall` / `ToolCall` / `ActivityEvent` for what the worker did; `UsageRecord` and `OrgSpendMonth` for spend.
+4. **Find the error.** A user-reported `(ref xxxxxx)` appears verbatim in the JSON log line that carries the real cause.
+5. **Rotate.** `CREDENTIAL_ENCRYPTION_KEY` (3.1), `AUTH_SECRET` (3.2), provider keys, and the database password if the host was reachable.
+6. **Record.** Timeline, blast radius (which workspaces, which data), fix, and the regression test that keeps it fixed.
+
+---
+
+## 4. Residual risks (honest list)
+
+- **Indirect prompt injection is mitigated, not solved.** Provenance limits *where* data can go, approvals gate *sending*, and tool output is bounded — but a hostile page can still steer a worker's reasoning and poison a deliverable's content. Human review of deliverables remains the real control.
+- **No per-tenant provider keys.** All live model spend runs on platform keys, bounded by the monthly budget and the run limits. A tenant that exhausts its budget stops; the platform still carries the cost until billing exists.
+- **No self-service password reset.** There is no email provider in this phase. An owner-initiated reset (or a support-assisted one) is the only path; invitations are shared as links by the inviting admin.
+- **No 2FA / SSO.** Passwords only. A stolen password gives full workspace access until the session version is bumped.
+- **`style-src 'unsafe-inline'`.** Required by React SSR style attributes and the toast library; scripts are nonce-only.
+- **Rate limits are per-subject, not per-network.** A distributed attacker with many IPs can still spread sign-in attempts across accounts; the per-account rule is the backstop.
+- **Trace payloads contain tenant data** (prompts, fetched page text) until the retention sweep clears them. Access to the database is access to that data.
+- **`simulated` mode is the default everywhere.** It is safe by construction, but it also means the live paths get less production mileage; treat the first live deployment as a fresh surface.
+- **Deliverable content is not scanned for malware**; it is worker-generated text served inert and never executed.
+
+---
+
+## 5. Reporting a vulnerability
+
+Email **security@** the operating organization (or open a private security advisory on the repository) with: what you found, how to reproduce it, what you could access, and whether any tenant data was involved. Please do not open a public issue, do not test against workspaces that are not yours, and do not run denial-of-service tests against shared infrastructure. We aim to acknowledge within two business days and to ship a fix or a mitigation before any public disclosure; we are happy to credit you.
+
+---
+
+## 6. Verifying the controls
+
+```bash
+npx vitest run tests/security     # limiter windows/lockouts/concurrency, CSP, redaction, budget, provenance, routes
+npx vitest run tests/auth tests/tools tests/platform/secrets.test.ts
+npm run audit:prod                # dependency advisories (expected: 0)
+curl -sI https://<host>/ | grep -Ei 'content-security-policy|strict-transport|x-frame|x-content-type'
+```
+
+After a deploy, load one page per route group with the browser console open and confirm there are no CSP violations (charts, dialogs and toasts are the ones worth checking), and confirm `/api/health` and `/api/ready` are reachable without a session while every other route redirects or 401s.

@@ -1,3 +1,4 @@
+import { config } from "@/server/config";
 import {
   JOB_FAMILY_INFO,
   describeCadence,
@@ -9,6 +10,7 @@ import {
   type JobSpec,
   type WorkerBlueprint,
 } from "@/server/domain";
+import { clampRunLimits } from "@/server/security";
 import { reportTableColumns } from "@/server/staffing";
 import { clip, lowerFirst, recostAndValidate } from "./shared";
 
@@ -92,13 +94,18 @@ export function parseFormat(text: string): DeliverableFormatSlug | null {
   return null;
 }
 
+/**
+ * "cap it at $2 a run" → 2. Clamped to the platform ceiling (audit INF-04): a manager asking for "$100,000 per
+ * run" gets the maximum we actually allow, and the proposal they review shows that effective number.
+ */
 export function parseCostLimit(text: string): number | null {
   const t = text.toLowerCase();
   if (!/\b(cost|budget|spend|spending|cheaper|limit|cap)\b/.test(t)) return null;
   const m = /\$\s?(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:dollars|usd|bucks)\b/.exec(t);
   if (!m) return null;
   const n = Number(m[1] ?? m[2]);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(n, config.limits.maxCostPerRunUsd);
 }
 
 // ── Edits ───────────────────────────────────────────────────────────────────
@@ -232,11 +239,12 @@ function rewireFormat(bp: WorkerBlueprint, spec: JobSpec, format: DeliverableFor
 }
 
 function applyCostLimit(bp: WorkerBlueprint, max: number): WorkerBlueprint {
+  // parseCostLimit already clamped, but the blueprint's other limits may predate the current ceilings.
   const deterministicChecks = bp.evaluation.deterministicChecks.map((c) =>
     c.type === "max_cost_usd" ? { ...c, description: `Run cost stays under $${max}`, config: { max } } : c,
   );
   const kpis = bp.kpis.map((k) => (k.metric === "cost_per_run_usd" ? { ...k, target: max } : k));
-  return { ...bp, limits: { ...bp.limits, maxCostPerRunUsd: max }, evaluation: { ...bp.evaluation, deterministicChecks }, kpis };
+  return { ...bp, limits: clampRunLimits({ ...bp.limits, maxCostPerRunUsd: max }), evaluation: { ...bp.evaluation, deterministicChecks }, kpis };
 }
 
 /** Words that only describe the structural edit itself; whatever survives the strip is extra intent. */

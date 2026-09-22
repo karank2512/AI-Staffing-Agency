@@ -1,13 +1,18 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
-import { BriefcaseBusiness } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SESSION_EXPIRED_PARAM, getSession, safeCallbackUrl } from "@/server/auth";
+import { SESSION_EXPIRED_PARAM, SIGN_UP_PATH, getSession, safeCallbackUrl } from "@/server/auth";
 import { DEMO_USER } from "@/server/auth/types";
+import { config } from "@/server/config";
+import { AuthHeader } from "../_components/form-ui";
 import { SIGN_IN_MESSAGES } from "../schema";
 import { SignInForm } from "./sign-in-form";
 
-export const metadata: Metadata = { title: "Sign in" };
+export const metadata: Metadata = {
+  title: "Sign in",
+  description: "Sign in to your AI Staffing Agency workspace to check on your workers and review their work.",
+  robots: { index: false, follow: false },
+};
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -32,40 +37,32 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
         ? SIGN_IN_MESSAGES.invalidCredentials
         : SIGN_IN_MESSAGES.unexpected;
 
+  // Demo credentials reach the browser ONLY for a deployment that opted in (DEMO_MODE=true). Anywhere else
+  // the form starts empty and nothing hints that a shared account exists.
+  const demo = config.auth.demoMode
+    ? { email: DEMO_USER.email, password: DEMO_USER.password, organizationName: DEMO_USER.organizationName }
+    : null;
+  const signUpOpen = config.auth.signupMode !== "closed";
+
   return (
-    <div className="flex flex-col gap-8">
-      <header className="flex flex-col items-center gap-3 text-center">
-        <div className="flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-foreground/10">
-          <BriefcaseBusiness className="size-5" aria-hidden />
-        </div>
-        <div className="space-y-1">
-          <p className="font-heading text-xl font-semibold tracking-tight">AI Staffing Agency</p>
-          <p className="text-sm text-muted-foreground">Hire AI workers like contractors.</p>
-        </div>
-      </header>
+    <>
+      <AuthHeader title="Sign in" description="Pick up where your team left off." />
 
-      <Card className="shadow-sm [--card-spacing:--spacing(6)]">
-        <CardHeader>
-          <CardTitle>
-            <h1>Sign in</h1>
-          </CardTitle>
-          <CardDescription>Your workforce is ready when you are.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SignInForm
-            defaultEmail={DEMO_USER.email}
-            defaultPassword={DEMO_USER.password}
-            callbackUrl={callbackUrl}
-            sessionExpired={sessionExpired}
-            initialError={initialError}
-          />
-        </CardContent>
-      </Card>
+      <SignInForm
+        callbackUrl={callbackUrl}
+        sessionExpired={sessionExpired}
+        initialError={initialError}
+        demo={demo}
+      />
 
-      <p className="text-center text-xs text-balance text-muted-foreground">
-        You&apos;re signing in to the {DEMO_USER.organizationName} demo workspace. The credentials are pre-filled —
-        nothing to remember.
-      </p>
-    </div>
+      {signUpOpen ? (
+        <p className="mt-10 border-t border-border pt-6 text-[15px] leading-[22px] text-muted-foreground">
+          New to AI Staffing Agency?{" "}
+          <Link href={SIGN_UP_PATH} className="font-medium text-link hover:underline">
+            Create an account <span aria-hidden>›</span>
+          </Link>
+        </p>
+      ) : null}
+    </>
   );
 }
