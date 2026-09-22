@@ -1,11 +1,8 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { ArrowRight, CircleAlert, LoaderCircle } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { AuthField, AuthStaticField } from "../../_components/field";
+import { FormAlert, SubmitButton } from "../../_components/form-ui";
 import { PasswordField } from "../../_components/password-field";
 import { acceptInviteAction } from "../../actions";
 import { FIELD_LIMITS, type AcceptInviteState } from "../../schema";
@@ -28,35 +25,25 @@ export function AcceptInviteForm({ token, email, organizationName, passwordMinLe
   const error = isPending ? null : state.error;
 
   return (
-    <form action={formAction} className="flex flex-col gap-5">
+    <form action={formAction} className="flex flex-col gap-4">
       <input type="hidden" name="token" value={token} />
 
-      {error ? (
-        <Alert variant="destructive" id="accept-invite-error">
-          <CircleAlert aria-hidden />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      ) : null}
+      {error ? <FormAlert id="accept-invite-error">{error}</FormAlert> : null}
 
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="invited-email">Email</Label>
-        <Input id="invited-email" value={email} readOnly disabled className="h-10" autoComplete="username" />
-      </div>
+      <AuthStaticField label="Joining as" value={email} />
 
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="name">Your name</Label>
-        <Input
-          id="name"
-          name="name"
-          autoComplete="name"
-          required
-          maxLength={FIELD_LIMITS.name}
-          className="h-10"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          readOnly={isPending}
-        />
-      </div>
+      <AuthField
+        name="name"
+        label="Your name"
+        value={name}
+        onValueChange={setName}
+        autoComplete="name"
+        required
+        maxLength={FIELD_LIMITS.name}
+        readOnly={isPending}
+        invalid={Boolean(error)}
+        describedBy={error ? "accept-invite-error" : undefined}
+      />
 
       <PasswordField
         value={password}
@@ -67,19 +54,13 @@ export function AcceptInviteForm({ token, email, organizationName, passwordMinLe
         label="Choose a password"
       />
 
-      <Button type="submit" size="lg" className="mt-1 h-10 w-full" disabled={isPending} aria-busy={isPending}>
-        {isPending ? (
-          <>
-            <LoaderCircle className="animate-spin" aria-hidden />
-            Setting up your account…
-          </>
-        ) : (
-          <>
-            Join {organizationName}
-            <ArrowRight aria-hidden />
-          </>
-        )}
-      </Button>
+      <div className="mt-2">
+        <SubmitButton
+          pending={isPending}
+          label={`Join ${organizationName}`}
+          pendingLabel="Setting up your account…"
+        />
+      </div>
     </form>
   );
 }

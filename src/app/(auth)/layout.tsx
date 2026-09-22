@@ -1,23 +1,30 @@
 import type { ReactNode } from "react";
+import type { Viewport } from "next";
+import { config } from "@/server/config";
+import { AuthNav } from "./_components/auth-nav";
 
-/** Chrome-less shell for signed-out pages: content centred on a quiet, textured backdrop. */
+export const viewport: Viewport = {
+  themeColor: "#ffffff",
+  colorScheme: "light",
+};
+
+/**
+ * Signed-out pages: a white page, the marketing bar, and one calm 400px column. No dot grid, no glow, no
+ * card — the type carries it.
+ */
 export default function AuthLayout({ children }: Readonly<{ children: ReactNode }>) {
+  const signUpOpen = config.auth.signupMode !== "closed";
+
   return (
-    <div className="relative isolate flex min-h-svh flex-col items-center justify-center overflow-hidden bg-muted/40 px-4 py-12">
-      {/* Faint dot grid that fades out towards the edges, plus a soft glow behind the card. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(circle_at_1px_1px,var(--border)_1px,transparent_0)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_at_center,black_25%,transparent_72%)]"
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute top-1/2 left-1/2 -z-10 size-[40rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/[0.04] blur-3xl"
-      />
+    <div className="flex min-h-dvh flex-col bg-background">
+      <AuthNav signUpOpen={signUpOpen} />
 
-      <main className="w-full max-w-sm">{children}</main>
+      <main className="flex-1 px-4 pt-[clamp(40px,12vh,112px)] pb-24 sm:px-6">
+        <div className="mx-auto w-full max-w-[400px]">{children}</div>
+      </main>
 
-      <footer className="mt-10 text-center text-xs text-muted-foreground">
-        Describe the job. Hire the worker. Review the work.
+      <footer className="px-4 pb-8 text-center text-[12px] leading-4 text-muted-foreground sm:px-6">
+        <p>&copy; {new Date().getFullYear()} AI Staffing Agency · Privacy · Terms</p>
       </footer>
     </div>
   );

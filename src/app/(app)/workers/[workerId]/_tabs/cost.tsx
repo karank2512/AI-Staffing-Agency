@@ -1,14 +1,10 @@
-import { Bot, FileText, FlaskConical, PiggyBank, Receipt, Wallet, Wrench } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { Section } from "@/components/section";
-import { SimulatedBadge } from "@/components/simulated-badge";
-import { StatCard } from "@/components/stat-card";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Stat, StatStrip } from "@/components/stat-card";
+import { Card, CardContent } from "@/components/ui/card";
 import { formatNumber, formatPercent, formatUsd, formatUsdPrecise, pluralize } from "@/lib/format";
-import { cn } from "@/lib/utils";
 import { getWorkerCost } from "@/server/queries/worker-profile";
+import { Row, RowList, RowMeta, RowTitle, Sep } from "../_components/rows";
 import { CostChart } from "./cost-chart";
 import type { WorkerTabProps } from "./types";
 
@@ -18,188 +14,150 @@ export default async function CostTab({ session, workerId, workerName }: WorkerT
   const estimate = cost.estimatedPerRunUsd;
   const actual = cost.avgCostPerRunUsd;
   const delta = estimate !== null && actual !== null && estimate > 0 ? (actual - estimate) / estimate : null;
-  const modelShare = cost.totalCostUsd > 0 ? cost.modelCostUsd / (cost.modelCostUsd + cost.toolCostUsd || 1) : null;
-  const simulatedNote = cost.simulated || (cost.simulatedShare !== null && cost.simulatedShare > 0);
+  const billable = cost.modelCostUsd + cost.toolCostUsd;
+  const modelShare = billable > 0 ? cost.modelCostUsd / billable : null;
+  const everythingSimulated = cost.simulated || cost.simulatedShare === 1;
+  const someSimulated = cost.simulatedShare !== null && cost.simulatedShare > 0;
 
   return (
     <>
-      {simulatedNote ? (
-        <div className="flex items-start gap-2.5 rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
-          <FlaskConical className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden="true" />
-          <p>
-            <span className="font-medium">These numbers are what {workerName} would cost with live providers.</span>{" "}
-            {cost.simulatedShare === 1 || cost.simulated
-              ? "Everything ran in Simulated mode, priced at each tier's reference model — nothing was actually spent."
-              : `${formatPercent(cost.simulatedShare)} of this spend came from simulated calls priced at reference rates.`}
+      <div>
+        <p className="text-metric-xl text-foreground">{formatUsd(cost.totalCostUsd)}</p>
+        <p className="text-body mt-2 text-muted-foreground">
+          {workerName}&apos;s spend over the last {cost.days} days
+          {cost.runs > 0 ? `, across ${pluralize(cost.runs, "run")}` : ""}.
+        </p>
+        {everythingSimulated || someSimulated ? (
+          <p className="text-footnote mt-2 max-w-[65ch] text-pretty text-muted-foreground">
+            {everythingSimulated
+              ? "Simulated. Every call was priced at its tier's reference model for comparison — nothing was billed."
+              : `${formatPercent(cost.simulatedShare)} of this came from simulated calls, priced for reference rather than billed.`}
           </p>
-        </div>
-      ) : null}
-
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          label={`Spend, last ${cost.days} days`}
-          value={formatUsd(cost.totalCostUsd)}
-          hint={cost.runs > 0 ? `across ${pluralize(cost.runs, "run")}` : "No runs in this window"}
-          icon={Wallet}
-          trend={cost.byDay.length > 1 ? { values: cost.byDay.map((d) => d.costUsd), tone: "neutral" } : undefined}
-        />
-        <StatCard label="Average per run" value={formatUsdPrecise(actual)} hint="Model calls + tool fees per run" icon={Receipt} />
-        <StatCard label="Per deliverable" value={formatUsdPrecise(cost.costPerDeliverableUsd)} hint="Spend ÷ deliverables produced" icon={FileText} />
-        <StatCard
-          label="Estimate vs actual"
-          value={formatUsdPrecise(actual)}
-          hint={estimate !== null ? `Blueprint estimate ${formatUsdPrecise(estimate)} per run` : "No estimate on file"}
-          icon={PiggyBank}
-          trend={
-            delta === null
-              ? undefined
-              : {
-                  direction: delta > 0.1 ? "up" : delta < -0.1 ? "down" : "flat",
-                  tone: delta > 0.1 ? "negative" : delta < -0.1 ? "positive" : "neutral",
-                  label: delta > 0.1 ? `${formatPercent(delta)} over estimate` : delta < -0.1 ? `${formatPercent(-delta)} under estimate` : "On estimate",
-                }
-          }
-        />
+        ) : null}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>Daily spend</CardTitle>
-            <CardDescription>What {workerName} cost each day over the last {cost.days} days.</CardDescription>
-          </CardHeader>
+      <StatStrip>
+        <Stat
+          label="Average a run"
+          value={formatUsdPrecise(actual)}
+          hint={
+            estimate === null
+              ? "No estimate on file"
+              : delta === null
+                ? `${formatUsdPrecise(estimate)} planned`
+                : delta > 0.1
+                  ? `${formatPercent(delta)} over the ${formatUsdPrecise(estimate)} plan`
+                  : delta < -0.1
+                    ? `${formatPercent(-delta)} under the ${formatUsdPrecise(estimate)} plan`
+                    : `On the ${formatUsdPrecise(estimate)} plan`
+          }
+        />
+        <Stat label="Per deliverable" value={formatUsdPrecise(cost.costPerDeliverableUsd)} hint="Spend ÷ work produced" />
+        <Stat
+          label="Thinking"
+          value={formatUsd(cost.modelCostUsd)}
+          hint={modelShare === null ? "No model calls yet" : `${formatPercent(modelShare)} of the bill`}
+        />
+        <Stat
+          label="Tools"
+          value={formatUsd(cost.toolCostUsd)}
+          hint={modelShare === null ? "No tool calls yet" : `${formatPercent(1 - modelShare)} of the bill`}
+        />
+      </StatStrip>
+
+      <Section title="Day by day" description={`What ${workerName} cost each day over the last ${cost.days} days.`}>
+        <Card>
           <CardContent>
             {hasSpend ? (
               <CostChart byDay={cost.byDay} />
             ) : (
-              <EmptyState icon={Wallet} title="No spend yet" description={`${workerName} hasn't used any models or tools in this window.`} className="py-10" />
+              <EmptyState
+                title="No spend yet"
+                description={`${workerName} hasn't used a model or a tool in this window.`}
+                className="py-14"
+              />
             )}
           </CardContent>
         </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Where the money goes</CardTitle>
-            <CardDescription>Model thinking vs tool fees.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {modelShare === null ? (
-              <p className="text-sm text-muted-foreground">Nothing to break down yet.</p>
-            ) : (
-              <>
-                <div className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                  <div className="h-full rounded-l-full bg-chart-1" style={{ width: `${Math.round(modelShare * 100)}%` }} />
-                  <div className="h-full flex-1 rounded-r-full bg-chart-2" />
-                </div>
-                <dl className="space-y-2 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-2 text-muted-foreground">
-                      <span className="size-2.5 rounded-full bg-chart-1" aria-hidden="true" />
-                      <Bot className="size-3.5" aria-hidden="true" />
-                      Models
-                    </dt>
-                    <dd className="metric font-medium">
-                      {formatUsd(cost.modelCostUsd)} <span className="text-xs text-muted-foreground">({formatPercent(modelShare)})</span>
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-2 text-muted-foreground">
-                      <span className="size-2.5 rounded-full bg-chart-2" aria-hidden="true" />
-                      <Wrench className="size-3.5" aria-hidden="true" />
-                      Tools
-                    </dt>
-                    <dd className="metric font-medium">
-                      {formatUsd(cost.toolCostUsd)} <span className="text-xs text-muted-foreground">({formatPercent(1 - modelShare)})</span>
-                    </dd>
-                  </div>
-                </dl>
-                <p className="text-xs text-pretty text-muted-foreground">
-                  {modelShare >= 0.8
-                    ? `Almost all of ${workerName}'s cost is model time. Moving a step to a faster tier, or replacing an agent step with a deterministic one, is where savings come from.`
-                    : modelShare >= 0.5
-                      ? `Model time is the bigger half. Tool fees are per call, so fewer searches per run also add up.`
-                      : `Tool fees dominate — ${workerName} makes many external calls per run. Tightening the per-run call limit is the quickest lever.`}
-                </p>
-              </>
-            )}
-            {cost.estimatedMonthlyUsd !== null ? (
-              <p className="border-t pt-3 text-xs text-muted-foreground">
-                Planned monthly budget from the blueprint: <span className="metric font-medium text-foreground">{formatUsd(cost.estimatedMonthlyUsd)}</span>
-              </p>
-            ) : null}
-          </CardContent>
-        </Card>
-      </div>
+      </Section>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Section title="By version" description="Did a change make runs cheaper or dearer?">
-          <Card className="py-0">
-            {cost.byVersion.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-muted-foreground">No runs in this window.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Version</TableHead>
-                    <TableHead className="text-right">Runs</TableHead>
-                    <TableHead className="text-right">Avg per run</TableHead>
-                    <TableHead className="text-right">Total</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {cost.byVersion.map((v) => (
-                    <TableRow key={v.workerVersionId}>
-                      <TableCell className="font-medium">v{v.version}</TableCell>
-                      <TableCell className="metric text-right">{formatNumber(v.runs, 0)}</TableCell>
-                      <TableCell className="metric text-right">{formatUsdPrecise(v.avgCostPerRunUsd)}</TableCell>
-                      <TableCell className="metric text-right font-medium">{formatUsd(v.totalCostUsd)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </Card>
+        <Section
+          className="flex flex-col"
+          title="Where the money went"
+          description={
+            modelShare === null
+              ? "Nothing to break down yet."
+              : modelShare >= 0.8
+                ? "Almost all of it is model time — a faster tier on one step is where savings come from."
+                : modelShare >= 0.5
+                  ? "Model time is the bigger half; tool fees are charged per call."
+                  : "Tool fees dominate — a tighter per-run call limit is the quickest lever."
+          }
+        >
+          {cost.byResource.length === 0 ? (
+            <Card className="flex-1">
+              <CardContent>
+                <p className="text-muted-foreground">No usage recorded in this window.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <RowList className="flex-1">
+              {cost.byResource.map((r) => (
+                <Row key={`${r.kind}:${r.resource}`} className="items-center">
+                  <div className="min-w-0 flex-1">
+                    <RowTitle>{r.label}</RowTitle>
+                    <RowMeta>
+                      <span>{r.kind === "MODEL" ? "Model" : "Tool"}</span>
+                      <Sep />
+                      <span>{formatNumber(r.calls, 0)} calls</span>
+                      {cost.totalCostUsd > 0 ? (
+                        <>
+                          <Sep />
+                          <span>{formatPercent(r.costUsd / cost.totalCostUsd)} of spend</span>
+                        </>
+                      ) : null}
+                    </RowMeta>
+                  </div>
+                  <span className="metric shrink-0 text-[15px] font-medium">{formatUsdPrecise(r.costUsd)}</span>
+                </Row>
+              ))}
+            </RowList>
+          )}
         </Section>
 
-        <Section title="By model and tool" description="Every resource that billed against this worker.">
-          <Card className="py-0">
-            {cost.byResource.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-muted-foreground">No usage recorded in this window.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Resource</TableHead>
-                    <TableHead className="text-right">Calls</TableHead>
-                    <TableHead className="text-right">Cost</TableHead>
-                    <TableHead className="text-right">Share</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {cost.byResource.map((r) => (
-                    <TableRow key={`${r.kind}:${r.resource}`}>
-                      <TableCell>
-                        <span className="flex items-center gap-2">
-                          <Badge variant="outline" className={cn("gap-1", r.kind === "MODEL" ? "text-chart-1" : "text-chart-2")}>
-                            {r.kind === "MODEL" ? <Bot /> : <Wrench />}
-                            {r.kind === "MODEL" ? "Model" : "Tool"}
-                          </Badge>
-                          <span className="font-medium">{r.label}</span>
-                          {r.label !== r.resource ? <span className="font-mono text-xs text-muted-foreground">{r.resource}</span> : null}
-                          {cost.simulated && r.kind === "MODEL" ? <SimulatedBadge /> : null}
-                        </span>
-                      </TableCell>
-                      <TableCell className="metric text-right">{formatNumber(r.calls, 0)}</TableCell>
-                      <TableCell className="metric text-right font-medium">{formatUsdPrecise(r.costUsd)}</TableCell>
-                      <TableCell className="metric text-right text-muted-foreground">
-                        {cost.totalCostUsd > 0 ? formatPercent(r.costUsd / cost.totalCostUsd) : "—"}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </Card>
+        <Section className="flex flex-col" title="By version" description="Did a change make runs cheaper or dearer?">
+          {cost.byVersion.length === 0 ? (
+            <Card className="flex-1">
+              <CardContent>
+                <p className="text-muted-foreground">No runs in this window.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <RowList className="flex-1">
+              {cost.byVersion.map((v) => (
+                <Row key={v.workerVersionId} className="items-center">
+                  <div className="min-w-0 flex-1">
+                    <RowTitle>Version {v.version}</RowTitle>
+                    <RowMeta>
+                      <span>{pluralize(v.runs, "run")}</span>
+                      <Sep />
+                      <span>{formatUsdPrecise(v.avgCostPerRunUsd)} a run</span>
+                    </RowMeta>
+                  </div>
+                  <span className="metric shrink-0 text-[15px] font-medium">{formatUsd(v.totalCostUsd)}</span>
+                </Row>
+              ))}
+              {cost.estimatedMonthlyUsd !== null ? (
+                <Row className="items-center">
+                  <div className="min-w-0 flex-1">
+                    <RowTitle className="font-normal text-muted-foreground">Planned monthly budget</RowTitle>
+                  </div>
+                  <span className="metric shrink-0 text-[15px] font-medium">{formatUsd(cost.estimatedMonthlyUsd)}</span>
+                </Row>
+              ) : null}
+            </RowList>
+          )}
         </Section>
       </div>
     </>

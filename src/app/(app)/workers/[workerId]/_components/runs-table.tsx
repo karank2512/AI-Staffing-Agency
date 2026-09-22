@@ -1,88 +1,82 @@
-import Link from "next/link";
-import { ArrowUpRight, PlayCircle } from "lucide-react";
+import type { RunTrigger } from "@prisma/client";
 import { EmptyState } from "@/components/empty-state";
 import { RelativeTime } from "@/components/relative-time";
 import { SimulatedBadge } from "@/components/simulated-badge";
 import { StatusBadge } from "@/components/status-badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatDuration, formatUsdPrecise, pluralize } from "@/lib/format";
+import { formatDuration, formatUsdPrecise } from "@/lib/format";
 import type { WorkerRunRow } from "@/server/queries/worker-profile";
-import { triggerLabel } from "./labels";
+import { Row, RowList, RowMeta, RowTitle, RowValue, Sep } from "./rows";
 
 export interface RunsTableProps {
   runs: WorkerRunRow[];
   workerName: string;
-  /** Hide the steps / version columns (overview card). */
+  /** Overview: hide the version and simulated markers so the list stays a glance. */
   compact?: boolean;
 }
 
-/** App-entity table (not DataTable — that one is for worker-produced records). */
+const HEADLINES: Record<RunTrigger, string> = {
+  MANUAL: "Run on request",
+  SCHEDULED: "Scheduled run",
+  RETRY: "Retry of an earlier run",
+  CHAT: "Run asked for in a conversation",
+  HIRE: "First run after hiring",
+};
+
+/** Runs as a readable list: one sentence per run, the numbers demoted to the right. */
 export function RunsTable({ runs, workerName, compact = false }: RunsTableProps) {
   if (runs.length === 0) {
     return (
-      <EmptyState
-        icon={PlayCircle}
-        title="No runs yet"
-        description={`${workerName} hasn't started working yet. Use "Run now" to kick off the first run.`}
-        className="py-8"
-      />
+      <RowList>
+        <li>
+          <EmptyState
+            title="No runs yet"
+            description={`${workerName} hasn't started working yet. "Run now" kicks off the first run.`}
+            className="py-16"
+          />
+        </li>
+      </RowList>
     );
   }
 
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Status</TableHead>
-          <TableHead>Trigger</TableHead>
-          <TableHead>Started</TableHead>
-          <TableHead className="text-right">Duration</TableHead>
-          <TableHead className="text-right">Cost</TableHead>
-          {compact ? null : <TableHead className="text-right">Steps</TableHead>}
-          {compact ? null : <TableHead className="text-right">Version</TableHead>}
-          <TableHead className="w-0">
-            <span className="sr-only">Open</span>
-          </TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {runs.map((run) => (
-          <TableRow key={run.id}>
-            <TableCell>
-              <div className="flex items-center gap-2">
-                <StatusBadge kind="run" status={run.status} />
-                {run.simulated && !compact ? <SimulatedBadge /> : null}
-              </div>
-              {run.status === "FAILED" && run.error ? (
-                <p className="mt-1 max-w-xs truncate text-xs text-rose-600" title={run.error}>
-                  {run.error}
-                </p>
-              ) : null}
-            </TableCell>
-            <TableCell className="text-muted-foreground">
-              {triggerLabel(run.trigger)}
-              {run.attempt > 1 ? <span className="ml-1 text-xs">· attempt {run.attempt}</span> : null}
-            </TableCell>
-            <TableCell className="text-muted-foreground">
+    <RowList>
+      {runs.map((run) => (
+        <Row key={run.id} href={`/runs/${run.id}`}>
+          <div className="min-w-0 flex-1">
+            <RowTitle>
+              {HEADLINES[run.trigger] ?? "Run"}
+              {run.attempt > 1 ? <span className="font-normal text-muted-foreground"> · attempt {run.attempt}</span> : null}
+            </RowTitle>
+            <RowMeta>
+              <StatusBadge kind="run" status={run.status} emphasis="dot" />
+              <Sep />
               <RelativeTime iso={run.startedAt ?? run.createdAt} />
-            </TableCell>
-            <TableCell className="metric text-right">{formatDuration(run.durationMs)}</TableCell>
-            <TableCell className="metric text-right">{formatUsdPrecise(run.costUsd)}</TableCell>
-            {compact ? null : <TableCell className="metric text-right">{run.stepsCount}</TableCell>}
-            {compact ? null : <TableCell className="metric text-right text-muted-foreground">v{run.version}</TableCell>}
-            <TableCell className="text-right">
-              <Link
-                href={`/runs/${run.id}`}
-                className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline"
-                aria-label={`Open run from ${triggerLabel(run.trigger).toLowerCase()} with ${pluralize(run.stepsCount, "step")}`}
-              >
-                Open
-                <ArrowUpRight className="size-3.5" aria-hidden="true" />
-              </Link>
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+              {run.deliverableCount > 0 ? (
+                <>
+                  <Sep />
+                  <span>{run.deliverableCount === 1 ? "1 deliverable" : `${run.deliverableCount} deliverables`}</span>
+                </>
+              ) : null}
+              {!compact ? (
+                <>
+                  <Sep />
+                  <span className="metric">v{run.version}</span>
+                  {run.simulated ? <SimulatedBadge /> : null}
+                </>
+              ) : null}
+            </RowMeta>
+            {run.status === "FAILED" && run.error ? (
+              <p className="text-footnote mt-1 line-clamp-1 text-danger" title={run.error}>
+                {run.error}
+              </p>
+            ) : null}
+          </div>
+          <RowValue className="pt-0.5">
+            <span className="block text-foreground">{formatUsdPrecise(run.costUsd)}</span>
+            <span className="mt-0.5 block">{formatDuration(run.durationMs)}</span>
+          </RowValue>
+        </Row>
+      ))}
+    </RowList>
   );
 }

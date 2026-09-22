@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, ChevronDown, ClipboardList, Loader2, MoreHorizontal, Pause, Play, UserMinus } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import type { WorkerStatus } from "@prisma/client";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import type { WorkerPermissions } from "@/server/queries/permissions";
 import { pauseWorkerAction, resumeWorkerAction, retireWorkerAction, runNowAction } from "../actions";
 import { useGenerateReview } from "./generate-review";
 
@@ -35,13 +37,27 @@ export interface WorkerActionsProps {
   status: WorkerStatus;
   /** False when the worker has no current version (nothing to run). */
   hasCurrentVersion: boolean;
+  /** What the viewer's role may do. The server enforces the same rules regardless. */
+  permissions: WorkerPermissions;
+  /**
+   * On a narrow screen the cluster becomes a sticky bottom bar. The chat tab turns this off — its composer
+   * already owns the bottom of the screen.
+   */
+  floatOnMobile?: boolean;
 }
 
 /**
- * Header controls. "Run now" (with one-off instructions) is the one primary button; Performance review, Replace,
- * Pause / Resume and Retire live in a "More" menu so five buttons never squeeze the worker's name into a sliver.
+ * One primary pill ("Run now") and a "…" menu for everything else — pause, replace, performance review, retire.
+ * On a narrow screen the cluster becomes the sticky bottom action bar instead of crowding the header.
  */
-export function WorkerActions({ workerId, workerName, status, hasCurrentVersion }: WorkerActionsProps) {
+export function WorkerActions({
+  workerId,
+  workerName,
+  status,
+  hasCurrentVersion,
+  permissions,
+  floatOnMobile = true,
+}: WorkerActionsProps) {
   const router = useRouter();
   const [runOpen, setRunOpen] = useState(false);
   const [retireOpen, setRetireOpen] = useState(false);
@@ -52,14 +68,22 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
 
   const retired = status === "RETIRED";
   const paused = status === "PAUSED";
-  const canRun = status === "ACTIVE" && hasCurrentVersion;
-  const runDisabledReason = retired
-    ? `${workerName} has been retired.`
-    : paused
-      ? `Resume ${workerName} to start a run.`
-      : !hasCurrentVersion
-        ? `${workerName} has no active version yet.`
-        : null;
+  const mayRun = permissions["workers.run"];
+  const mayManage = permissions["workers.manage"];
+  const mayReview = permissions["reviews.generate"];
+  const canRun = mayRun && status === "ACTIVE" && hasCurrentVersion;
+
+  const runDisabledReason = !mayRun
+    ? "Your role can't start runs. Ask a workspace admin."
+    : retired
+      ? `${workerName} has been retired.`
+      : paused
+        ? `Resume ${workerName} to start a run.`
+        : !hasCurrentVersion
+          ? `${workerName} has no active version yet.`
+          : null;
+
+  const menuItems = (mayReview ? 1 : 0) + (mayManage ? 1 : 0);
 
   function runNow() {
     startRun(async () => {
@@ -71,7 +95,9 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
       setRunOpen(false);
       setInstructions("");
       toast.success(`${workerName} is on it`, {
-        description: instructions.trim() ? "Your one-off instructions will be applied to this run." : "The run has been queued and will start shortly.",
+        description: instructions.trim()
+          ? "Your one-off instructions will be applied to this run."
+          : "The run has been queued and will start shortly.",
         action: { label: "Watch live", onClick: () => router.push(`/runs/${r.data.runId}`) },
       });
       router.refresh();
@@ -93,72 +119,30 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
   }
 
   const runButton = (
-    <Button disabled={!canRun || running} onClick={canRun ? () => setRunOpen(true) : undefined}>
-      {running ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
-      Run now
+    <Button
+      disabled={!canRun || running}
+      onClick={canRun ? () => setRunOpen(true) : undefined}
+      className="max-sm:h-11 max-sm:flex-1 max-sm:text-[15px]"
+    >
+      {running ? "Starting…" : "Run now"}
     </Button>
   );
 
-  const busy = reviewing || toggling;
-
   return (
-    <>
-      {/* Non-modal so a menu item can open the Retire dialog without Radix leaving the page unclickable. */}
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline" aria-label={`More actions for ${workerName}`}>
-            {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <MoreHorizontal aria-hidden="true" />}
-            More
-            <ChevronDown className="opacity-60" aria-hidden="true" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-52">
-          <DropdownMenuItem disabled={reviewing || !hasCurrentVersion} onSelect={review}>
-            {reviewing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ClipboardList aria-hidden="true" />}
-            Performance review
-          </DropdownMenuItem>
-          <DropdownMenuItem asChild>
-            <Link href={`/workers/${workerId}?tab=versions#replace`}>
-              <ArrowLeftRight aria-hidden="true" />
-              Replace {workerName}
-            </Link>
-          </DropdownMenuItem>
-          {!retired ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={toggling} onSelect={togglePause}>
-                {toggling ? <Loader2 className="animate-spin" aria-hidden="true" /> : paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
-                {paused ? "Resume" : "Pause"}
-              </DropdownMenuItem>
-              <DropdownMenuItem variant="destructive" onSelect={() => setRetireOpen(true)}>
-                <UserMinus aria-hidden="true" />
-                Retire…
-              </DropdownMenuItem>
-            </>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      {!retired ? (
-        <RetireDialog
-          open={retireOpen}
-          onOpenChange={setRetireOpen}
-          workerName={workerName}
-          onConfirm={async () => {
-            const r = await retireWorkerAction(workerId);
-            if (!r.ok) throw new Error(r.error);
-            toast.success(`${workerName} has been retired`, { description: "Thanks for the work. The job is open for a new hire." });
-            router.refresh();
-          }}
-        />
-      ) : null}
-
+    <div
+      className={cn(
+        "flex items-center gap-2.5",
+        // Desktop: beside the score. Mobile: the sticky bottom bar the design asks for instead of header buttons.
+        floatOnMobile &&
+          "max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:z-30 max-sm:gap-3 max-sm:px-4 max-sm:py-3 max-sm:pb-[calc(0.75rem+env(safe-area-inset-bottom))] max-sm:shadow-bar max-sm:material-thick",
+      )}
+    >
       <Dialog open={runOpen} onOpenChange={(next) => (running ? undefined : setRunOpen(next))}>
         {runDisabledReason ? (
           <Tooltip>
             {/* A disabled button swallows pointer events, so the tooltip listens on a wrapper. */}
             <TooltipTrigger asChild>
-              <span tabIndex={0} className="inline-flex">
+              <span tabIndex={0} className="inline-flex max-sm:flex-1">
                 {runButton}
               </span>
             </TooltipTrigger>
@@ -171,8 +155,8 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
           <DialogHeader>
             <DialogTitle>Ask {workerName} to run now</DialogTitle>
             <DialogDescription>
-              {workerName} will start a fresh run right away, on top of the regular schedule. Add one-off instructions if this run
-              should be different.
+              {workerName} will start a fresh run right away, on top of the regular schedule. Add one-off
+              instructions if this run should be different.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -181,31 +165,90 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
               id="run-now-instructions"
               value={instructions}
               onChange={(e) => setInstructions(e.target.value)}
-              placeholder={`e.g. Focus on seed-stage rounds only, and keep it to the top 5.`}
+              placeholder="e.g. Focus on seed-stage rounds only, and keep it to the top 5."
               rows={4}
               maxLength={4_000}
               disabled={running}
             />
-            <p className="text-xs text-muted-foreground">
-              One instruction per line. They apply to this run only — to change how {workerName} works permanently, use{" "}
-              <Link href={`/workers/${workerId}?tab=chat`} className="text-primary underline-offset-4 hover:underline">
-                Talk to worker
+            <p className="text-footnote text-muted-foreground">
+              One instruction per line. They apply to this run only — to change how {workerName} works for good,
+              use{" "}
+              <Link href={`/workers/${workerId}?tab=chat`} className="text-link hover:underline">
+                Talk to {workerName}
               </Link>
               .
             </p>
           </div>
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={running} onClick={() => setRunOpen(false)}>
+            <Button type="button" variant="secondary" disabled={running} onClick={() => setRunOpen(false)}>
               Cancel
             </Button>
             <Button type="button" disabled={running} onClick={runNow}>
-              {running ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
-              Start run
+              {running ? "Starting…" : "Start run"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+
+      {menuItems > 0 ? (
+        /* Non-modal so a menu item can open the Retire dialog without Radix leaving the page unclickable. */
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="secondary"
+              size="icon-lg"
+              aria-label={`More actions for ${workerName}`}
+              className="max-sm:size-11"
+            >
+              <MoreHorizontal aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-52">
+            {mayReview ? (
+              <DropdownMenuItem disabled={reviewing || !hasCurrentVersion} onSelect={review}>
+                {reviewing ? "Writing review…" : "Performance review"}
+              </DropdownMenuItem>
+            ) : null}
+            {mayManage ? (
+              <>
+                {!retired ? (
+                  <DropdownMenuItem disabled={toggling} onSelect={togglePause}>
+                    {toggling ? "Saving…" : paused ? "Resume" : "Pause"}
+                  </DropdownMenuItem>
+                ) : null}
+                <DropdownMenuItem asChild>
+                  <Link href={`/workers/${workerId}?tab=versions`}>Replace {workerName}…</Link>
+                </DropdownMenuItem>
+                {!retired ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onSelect={() => setRetireOpen(true)}>
+                      Retire…
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+
+      {mayManage && !retired ? (
+        <RetireDialog
+          open={retireOpen}
+          onOpenChange={setRetireOpen}
+          workerName={workerName}
+          onConfirm={async () => {
+            const r = await retireWorkerAction(workerId);
+            if (!r.ok) throw new Error(r.error);
+            toast.success(`${workerName} has been retired`, {
+              description: "Thanks for the work. The job is open for a new hire.",
+            });
+            router.refresh();
+          }}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -245,22 +288,21 @@ function RetireDialog({
         <DialogHeader>
           <DialogTitle>Retire {workerName}?</DialogTitle>
           <DialogDescription>
-            Queued runs and pending approvals are cancelled and the schedule stops. {workerName}&apos;s history, deliverables and
-            reviews are kept, and the job can be re-staffed later.
+            Queued runs and pending approvals are cancelled and the schedule stops. {workerName}&apos;s history,
+            deliverables and reviews are kept, and the job can be re-staffed later.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+          <Button type="button" variant="secondary" disabled={pending} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button
             type="button"
             disabled={pending}
             onClick={confirm}
-            className="bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/30"
+            className="bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30"
           >
-            {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <UserMinus aria-hidden="true" />}
-            Retire worker
+            {pending ? "Retiring…" : "Retire worker"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -2,7 +2,6 @@
 
 import { useTransition, type ComponentProps } from "react";
 import { useRouter } from "next/navigation";
-import { ClipboardList, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { generateReviewAction } from "../actions";
@@ -48,12 +47,19 @@ export interface GenerateReviewButtonProps extends Pick<ComponentProps<typeof Bu
   label?: string;
 }
 
-export function GenerateReviewButton({ workerId, workerName, disabled = false, label = "Performance review", variant = "outline", size, className }: GenerateReviewButtonProps) {
+export function GenerateReviewButton({
+  workerId,
+  workerName,
+  disabled = false,
+  label = "Write a review",
+  variant = "secondary",
+  size,
+  className,
+}: GenerateReviewButtonProps) {
   const { reviewing, generate } = useGenerateReview(workerId, workerName);
   return (
     <Button type="button" variant={variant} size={size} className={className} disabled={disabled || reviewing} onClick={generate}>
-      {reviewing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ClipboardList aria-hidden="true" />}
-      {label}
+      {reviewing ? "Writing…" : label}
     </Button>
   );
 }

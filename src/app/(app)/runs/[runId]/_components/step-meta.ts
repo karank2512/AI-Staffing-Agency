@@ -1,33 +1,22 @@
 import type { RunStepKind, RunStepStatus, RunTrigger, ToolCallStatus } from "@prisma/client";
-import {
-  Brain,
-  ClipboardCheck,
-  Cog,
-  FileText,
-  ListChecks,
-  ShieldCheck,
-  StickyNote,
-  TriangleAlert,
-  Wrench,
-  type LucideIcon,
-} from "lucide-react";
 import type { StatusTone } from "@/lib/status";
 
 /**
  * Pure lookups shared by the timeline pieces (Prisma enums are type-only imports, so this is client-safe).
- * Labels are contractor-style: a step is something the worker did, not something the system executed.
+ * Labels are contractor-style: a step is something the worker did, not something the system executed. There
+ * are deliberately no icons here — the timeline carries state in a single coloured dot per step.
  */
 
-export const STEP_KIND_META: Record<RunStepKind, { icon: LucideIcon; label: string }> = {
-  PLAN: { icon: ListChecks, label: "Plan" },
-  MODEL_CALL: { icon: Brain, label: "Thinking" },
-  TOOL_CALL: { icon: Wrench, label: "Tool" },
-  DETERMINISTIC: { icon: Cog, label: "Processing" },
-  APPROVAL: { icon: ShieldCheck, label: "Approval" },
-  DELIVERABLE: { icon: FileText, label: "Deliverable" },
-  EVALUATION: { icon: ClipboardCheck, label: "Evaluation" },
-  NOTE: { icon: StickyNote, label: "Note" },
-  ERROR: { icon: TriangleAlert, label: "Problem" },
+export const STEP_KIND_LABEL: Record<RunStepKind, string> = {
+  PLAN: "Plan",
+  MODEL_CALL: "Thinking",
+  TOOL_CALL: "Tool",
+  DETERMINISTIC: "Processing",
+  APPROVAL: "Approval",
+  DELIVERABLE: "Deliverable",
+  EVALUATION: "Evaluation",
+  NOTE: "Note",
+  ERROR: "Problem",
 };
 
 export const STEP_STATUS_META: Record<RunStepStatus, { label: string; tone: StatusTone; pulse?: boolean }> = {

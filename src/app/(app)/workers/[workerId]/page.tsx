@@ -42,7 +42,7 @@ const TAB_COMPONENTS: Record<WorkerTab, TabComponent> = {
 const loadHeader = cache(async (workerId: string): Promise<WorkerHeaderView | null> => {
   const s = await requireSession();
   try {
-    return await getWorkerHeader(s.organizationId, workerId);
+    return await getWorkerHeader(s.organizationId, workerId, { role: s.role });
   } catch (e) {
     if (isAppError(e) && e.code === "NOT_FOUND") return null;
     throw e;
@@ -73,9 +73,9 @@ export default async function WorkerProfilePage({ params, searchParams }: PagePr
 
   return (
     <>
-      <WorkerHeader worker={worker} />
-      <WorkerTabNav workerId={worker.id} active={tab} className="mb-6" />
-      <div key={tab} className="space-y-8">
+      <WorkerHeader worker={worker} floatingMobileActions={tab !== "chat"} />
+      <WorkerTabNav workerId={worker.id} workerName={worker.name} active={tab} />
+      <div key={tab} className="space-y-14 pt-10">
         <Tab session={session} workerId={worker.id} workerName={worker.name} />
       </div>
       {/* While a run is in flight the header banner, recent runs and the score can all change. */}

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, FileText } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { JsonView } from "@/components/json-view";
 import { SimulatedBadge } from "@/components/simulated-badge";
 import { Button } from "@/components/ui/button";
@@ -13,9 +13,10 @@ import { ApprovalDecision } from "./approval-decision";
 import { deliverableIdOf, recordCounts, TOOL_CALL_STATUS_META } from "./step-meta";
 
 /**
- * The expandable body of a timeline row. What it shows depends on the step kind: model calls get their
- * request/response, tool calls their input/output, approvals their decision (or the inline Approve/Decline
- * form while the run waits), deterministic steps their before/after counts.
+ * The expandable body of a timeline row, rendered in one flat inset panel: no boxes inside boxes, just
+ * hairlines between entries. What it shows depends on the step kind — model calls get their request and
+ * response, tool calls their input and output, approvals the decision (or the inline Approve / Decline while
+ * the run waits), deterministic steps their before-and-after counts.
  */
 
 export interface StepDetailsProps {
@@ -24,74 +25,99 @@ export interface StepDetailsProps {
   runStatus: string;
   workerId: string;
   workerName: string;
+  canDecide?: boolean;
 }
 
+/** JSON blocks sit on the white card colour so they read as insets inside the already-gray panel. */
+const JSON_ON_PANEL = "[&_pre]:bg-card";
+
 function Meta({ children }: { children: React.ReactNode }) {
-  return <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">{children}</div>;
+  return <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-footnote text-muted-foreground">{children}</div>;
+}
+
+function Entry({ className, children }: { className?: string; children: React.ReactNode }) {
+  return <div className={cn("space-y-2.5 border-b border-border pb-4 last:border-0 last:pb-0", className)}>{children}</div>;
 }
 
 function ModelCallItem({ call }: { call: RunModelCallView }) {
   return (
-    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+    <Entry>
       <Meta>
         <span className="font-medium text-foreground">{call.purpose}</span>
-        <span className="font-mono">{call.provider}:{call.model}</span>
+        <span className="font-mono">
+          {call.provider}:{call.model}
+        </span>
         <span>{call.tier} tier</span>
-        <span className="tabular-nums">{formatTokens(call.inputTokens)} in · {formatTokens(call.outputTokens)} out</span>
-        <span className="tabular-nums">{formatUsdPrecise(call.costUsd)}</span>
-        <span className="tabular-nums">{formatDuration(call.latencyMs)}</span>
+        <span className="metric">
+          {formatTokens(call.inputTokens)} in · {formatTokens(call.outputTokens)} out
+        </span>
+        <span className="metric">{formatUsdPrecise(call.costUsd)}</span>
+        <span className="metric">{formatDuration(call.latencyMs)}</span>
         {call.simulated ? <SimulatedBadge /> : null}
       </Meta>
-      {call.error ? <p className="text-sm text-rose-600">{call.error}</p> : null}
+      {call.error ? <p className="text-[15px] text-danger">{call.error}</p> : null}
       <div className="grid gap-2 lg:grid-cols-2">
-        <JsonView label="Request" value={call.request} />
-        <JsonView label="Response" value={call.response} />
+        <JsonView label="What we asked" value={call.request} className={JSON_ON_PANEL} />
+        <JsonView label="What came back" value={call.response} className={JSON_ON_PANEL} />
       </div>
-    </div>
+    </Entry>
   );
 }
 
 function ToolCallItem({ call }: { call: RunToolCallView }) {
   const meta = TOOL_CALL_STATUS_META[call.status];
   return (
-    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+    <Entry>
       <Meta>
         <span className="font-mono font-medium text-foreground">{call.toolName}</span>
         <span className={cn("inline-flex items-center gap-1.5", TONE_CLASSES[meta.tone].text)}>
-          <span className={cn("size-1.5 rounded-full", TONE_CLASSES[meta.tone].dot)} aria-hidden="true" />
+          <span className={cn("size-[7px] rounded-full", TONE_CLASSES[meta.tone].dot)} aria-hidden="true" />
           {meta.label}
         </span>
-        {call.latencyMs !== null ? <span className="tabular-nums">{formatDuration(call.latencyMs)}</span> : null}
-        {call.costUsd > 0 ? <span className="tabular-nums">{formatUsdPrecise(call.costUsd)}</span> : null}
+        {call.latencyMs !== null ? <span className="metric">{formatDuration(call.latencyMs)}</span> : null}
+        {call.costUsd > 0 ? <span className="metric">{formatUsdPrecise(call.costUsd)}</span> : null}
         {call.simulated ? <SimulatedBadge /> : null}
       </Meta>
-      {call.error ? <p className="text-sm text-rose-600">{call.error}</p> : null}
+      {call.error ? <p className="text-[15px] text-danger">{call.error}</p> : null}
       <div className="grid gap-2 lg:grid-cols-2">
-        <JsonView label="Input" value={call.input} />
-        <JsonView label="Output" value={call.output} />
+        <JsonView label="Input" value={call.input} className={JSON_ON_PANEL} />
+        <JsonView label="Output" value={call.output} className={JSON_ON_PANEL} />
       </div>
-    </div>
+    </Entry>
   );
 }
 
-function ApprovalPanel({ step, runId, runStatus, workerId, workerName }: StepDetailsProps) {
+function ApprovalPanel({ step, runId, runStatus, workerId, workerName, canDecide }: StepDetailsProps) {
   const approval = step.approval;
-  if (!approval) return <p className="text-sm text-muted-foreground">{step.detail ?? "Waiting for a decision."}</p>;
+  if (!approval) return <p className="text-[15px] text-muted-foreground">{step.detail ?? "Waiting for a decision."}</p>;
   if (approval.status === "PENDING" && runStatus === "WAITING_FOR_APPROVAL") {
-    return <ApprovalDecision runId={runId} workerId={workerId} workerName={workerName} approval={approval} />;
+    return (
+      <ApprovalDecision runId={runId} workerId={workerId} workerName={workerName} approval={approval} canDecide={canDecide} />
+    );
   }
-  const verb = approval.status === "APPROVED" ? "Approved" : approval.status === "REJECTED" ? "Declined" : approval.status === "EXPIRED" ? "Expired" : "Pending";
+  const verb =
+    approval.status === "APPROVED"
+      ? "You approved it"
+      : approval.status === "REJECTED"
+        ? "You declined it"
+        : approval.status === "EXPIRED"
+          ? "The request expired"
+          : "Still pending";
   return (
-    <div className="space-y-2">
-      <p className="text-sm font-medium">{approval.title}</p>
-      {approval.description ? <p className="text-sm text-pretty text-muted-foreground">{approval.description}</p> : null}
-      <p className="text-sm text-muted-foreground">
+    <div className="space-y-2.5">
+      <p className="text-title-3 text-pretty">{approval.title}</p>
+      {approval.description ? <p className="text-[15px] text-pretty text-muted-foreground">{approval.description}</p> : null}
+      <p className="text-footnote text-muted-foreground">
         {verb}
-        {approval.decidedByName ? ` by ${approval.decidedByName}` : ""}
+        {approval.decidedByName ? ` · ${approval.decidedByName}` : ""}
         {approval.decidedAt ? ` · ${formatDateTime(approval.decidedAt)}` : ""}
       </p>
-      {approval.decisionNote ? <blockquote className="border-l-2 pl-3 text-sm text-pretty italic text-muted-foreground">“{approval.decisionNote}”</blockquote> : null}
-      <JsonView label="Requested action" value={approval.payload} />
+      {approval.decisionNote ? (
+        <blockquote className="border-l-[3px] border-input pl-4 text-[15px] text-pretty text-muted-foreground">
+          “{approval.decisionNote}”
+        </blockquote>
+      ) : null}
+      <JsonView label="What was requested" value={approval.payload} className={JSON_ON_PANEL} />
     </div>
   );
 }
@@ -99,21 +125,22 @@ function ApprovalPanel({ step, runId, runStatus, workerId, workerName }: StepDet
 function DeterministicPanel({ step }: { step: RunStepDetailView }) {
   const counts = recordCounts(step.output);
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       {counts ? (
-        <div className="flex items-center gap-2 text-sm">
-          <span className="metric tabular-nums">{formatNumber(counts.before)}</span>
-          <span className="text-muted-foreground">records in</span>
-          <ArrowRight className="size-3.5 text-muted-foreground" aria-hidden="true" />
-          <span className="metric tabular-nums">{formatNumber(counts.after)}</span>
-          <span className="text-muted-foreground">out</span>
-          {counts.before > counts.after ? <span className="text-xs text-muted-foreground">({formatNumber(counts.before - counts.after)} removed)</span> : null}
-        </div>
+        <p className="text-[15px]">
+          <span className="metric font-medium">{formatNumber(counts.before)}</span>
+          <span className="text-muted-foreground"> records in, </span>
+          <span className="metric font-medium">{formatNumber(counts.after)}</span>
+          <span className="text-muted-foreground">
+            {" "}
+            out{counts.before > counts.after ? ` — ${formatNumber(counts.before - counts.after)} dropped` : ""}
+          </span>
+        </p>
       ) : null}
-      {step.error ? <p className="text-sm text-rose-600">{step.error}</p> : null}
+      {step.error ? <p className="text-[15px] text-danger">{step.error}</p> : null}
       <div className="grid gap-2 lg:grid-cols-2">
-        <JsonView label="Configuration" value={step.input} />
-        <JsonView label="Result" value={step.output} />
+        <JsonView label="Configuration" value={step.input} className={JSON_ON_PANEL} />
+        <JsonView label="Result" value={step.output} className={JSON_ON_PANEL} />
       </div>
     </div>
   );
@@ -125,9 +152,11 @@ export function StepDetails(props: StepDetailsProps) {
   switch (step.kind) {
     case "MODEL_CALL":
       return (
-        <div className="space-y-2">
-          {step.error ? <p className="text-sm text-rose-600">{step.error}</p> : null}
-          {step.modelCalls.length === 0 ? <p className="text-sm text-muted-foreground">No model call was recorded for this step.</p> : null}
+        <div className="space-y-4">
+          {step.error ? <p className="text-[15px] text-danger">{step.error}</p> : null}
+          {step.modelCalls.length === 0 ? (
+            <p className="text-[15px] text-muted-foreground">No model call was recorded for this step.</p>
+          ) : null}
           {step.modelCalls.map((call) => (
             <ModelCallItem key={call.id} call={call} />
           ))}
@@ -135,9 +164,9 @@ export function StepDetails(props: StepDetailsProps) {
       );
     case "TOOL_CALL":
       return (
-        <div className="space-y-2">
-          {step.error ? <p className="text-sm text-rose-600">{step.error}</p> : null}
-          {step.toolCalls.length === 0 ? <JsonView label="Input" value={step.input} /> : null}
+        <div className="space-y-4">
+          {step.error ? <p className="text-[15px] text-danger">{step.error}</p> : null}
+          {step.toolCalls.length === 0 ? <JsonView label="Input" value={step.input} className={JSON_ON_PANEL} /> : null}
           {step.toolCalls.map((call) => (
             <ToolCallItem key={call.id} call={call} />
           ))}
@@ -150,12 +179,12 @@ export function StepDetails(props: StepDetailsProps) {
     case "DELIVERABLE": {
       const id = deliverableIdOf(step.output);
       return (
-        <div className="flex flex-wrap items-center gap-3">
-          {step.detail ? <span className="text-sm text-muted-foreground">{step.detail}</span> : null}
+        <div className="flex flex-wrap items-center gap-4">
+          {step.detail ? <span className="text-[15px] text-muted-foreground">{step.detail}</span> : null}
           {id ? (
-            <Button asChild size="sm" variant="outline">
+            <Button asChild variant="link">
               <Link href={`/deliverables/${id}`}>
-                <FileText aria-hidden="true" /> Open deliverable
+                Read the deliverable <ChevronRight data-icon="inline-end" aria-hidden="true" />
               </Link>
             </Button>
           ) : null}
@@ -163,13 +192,15 @@ export function StepDetails(props: StepDetailsProps) {
       );
     }
     case "ERROR":
-      return <p className="text-sm text-pretty text-rose-600">{step.error ?? step.detail ?? "Something went wrong."}</p>;
+      return <p className="text-[15px] text-pretty text-danger">{step.error ?? step.detail ?? "Something went wrong."}</p>;
     default:
       return (
-        <div className="space-y-2">
-          {step.error ? <p className="text-sm text-rose-600">{step.error}</p> : null}
-          {step.detail ? <p className="text-sm text-muted-foreground">{step.detail}</p> : null}
-          {step.output !== null && step.output !== undefined ? <JsonView label="Result" value={step.output} /> : null}
+        <div className="space-y-2.5">
+          {step.error ? <p className="text-[15px] text-danger">{step.error}</p> : null}
+          {step.detail ? <p className="text-[15px] text-muted-foreground">{step.detail}</p> : null}
+          {step.output !== null && step.output !== undefined ? (
+            <JsonView label="Result" value={step.output} className={JSON_ON_PANEL} />
+          ) : null}
         </div>
       );
   }

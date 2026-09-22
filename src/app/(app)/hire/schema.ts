@@ -30,8 +30,9 @@ export function stepKeyFor(serverStep: "questions" | "spec" | "proposal" | null)
 export const DESCRIPTION_MIN_CHARS = 10;
 export const DESCRIPTION_MAX_CHARS = 5_000;
 
+/** One concrete sentence, not instructions: the shape of a good brief is easier to copy than to explain. */
 export const DESCRIPTION_PLACEHOLDER =
-  "Describe the job like you would to a new contractor. What should they produce, how often, and who is it for?\n\nFor example: “Every Monday, find AI infrastructure startups that announced funding in the last week, capture the round details with a source, and send the report to our research team.”";
+  "Every Monday, summarize what our three main competitors shipped last week and email it to the product team.";
 
 export interface ExampleJob {
   id: string;
@@ -63,6 +64,12 @@ export const EXAMPLE_JOBS: readonly ExampleJob[] = [
       "Build a weekly lead list of Series A fintech companies as a CSV. Each week, find 25 accounts with a likely decision-maker, why they fit our ICP, and a source for each, delivered as a CSV we can import into our CRM.",
   },
 ];
+
+/** `/hire?prefill=funding-tracker` (the Workforce empty state deep-links here). Unknown ids simply start blank. */
+export function exampleJobById(id: string | undefined): ExampleJob | null {
+  if (!id) return null;
+  return EXAMPLE_JOBS.find((job) => job.id === id) ?? null;
+}
 
 export const ScopeJobInputSchema = z
   .string()
@@ -221,3 +228,21 @@ export const CONFIDENCE_LABELS: Record<"low" | "medium" | "high", string> = {
   medium: "Medium confidence",
   high: "High confidence",
 };
+
+export const DELIVERABLE_FORMAT_SENTENCES: Record<"markdown" | "csv" | "json", string> = {
+  markdown: "a written report",
+  csv: "a spreadsheet you can import",
+  json: "structured data",
+};
+
+/**
+ * The narrative shown while the worker is being designed. Deterministic: same job, same lines, every time —
+ * never `Math.random()`, and never a claim about work that is not happening.
+ */
+export function designNarrative(specTitle: string): readonly string[] {
+  return [
+    `Reading the spec for “${specTitle}”.`,
+    "Choosing the steps, and which of them can run as plain code.",
+    "Picking tools, setting guardrails and estimating the cost per run.",
+  ];
+}

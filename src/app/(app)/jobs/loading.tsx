@@ -1,50 +1,29 @@
-import type { ComponentProps } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
 
-function Bone({ className, ...props }: ComponentProps<typeof Skeleton>) {
-  return <Skeleton className={cn("bg-slate-200/70", className)} {...props} />;
-}
-
-/** Mirrors the /jobs layout: header → filter pills → a table of rows. */
+/** Mirrors /jobs: title, segmented filter, then a card of hairline rows. */
 export default function JobsLoading() {
   return (
     <div role="status" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading jobs…</span>
 
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-2">
-          <Bone className="h-7 w-24" />
-          <Bone className="h-4 w-96 max-w-full" />
-        </div>
-        <Bone className="h-8 w-32" />
+      <div className="mb-10 space-y-3">
+        <Skeleton className="h-8 w-32 rounded-sm" />
+        <Skeleton className="h-5 w-96 max-w-full rounded-sm" />
       </div>
 
-      <div className="mb-4 flex gap-1.5">
+      <Skeleton className="h-8 w-80 max-w-full rounded-full" />
+
+      <div className="mt-6 overflow-hidden rounded-xl bg-card shadow-card">
+        <div className="h-11 border-b border-border" />
         {Array.from({ length: 6 }, (_, i) => (
-          <Bone key={i} className="h-7 w-20 rounded-full" />
-        ))}
-      </div>
-
-      <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-        <div className="flex items-center gap-6 border-b px-4 py-3">
-          {Array.from({ length: 6 }, (_, i) => (
-            <Bone key={i} className="h-3.5 w-20" />
-          ))}
-        </div>
-        {Array.from({ length: 5 }, (_, i) => (
-          <div key={i} className="flex items-center gap-6 border-b px-4 py-3 last:border-0">
-            <div className="w-64 space-y-1.5">
-              <Bone className="h-4 w-52" />
-              <Bone className="h-3 w-28" />
+          <div key={i} className="flex h-16 items-center gap-6 px-6 not-last:border-b not-last:border-border">
+            <div className="min-w-0 flex-1 space-y-2">
+              <Skeleton className="h-4 w-56 max-w-full rounded-sm" />
+              <Skeleton className="h-3 w-40 max-w-full rounded-sm" />
             </div>
-            <Bone className="h-5 w-20 rounded-full" />
-            <div className="flex items-center gap-2">
-              <Bone className="size-6 rounded-full" />
-              <Bone className="h-4 w-16" />
-            </div>
-            <Bone className="h-4 w-32" />
-            <Bone className="h-4 w-20" />
+            <Skeleton className="hidden h-4 w-24 rounded-sm sm:block" />
+            <Skeleton className="hidden h-4 w-20 rounded-sm sm:block" />
+            <Skeleton className="hidden h-4 w-16 rounded-sm sm:block" />
           </div>
         ))}
       </div>

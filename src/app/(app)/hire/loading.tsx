@@ -1,42 +1,33 @@
-import type { ComponentProps } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
 
-function Bone({ className, ...props }: ComponentProps<typeof Skeleton>) {
-  return <Skeleton className={cn("bg-slate-200/70", className)} {...props} />;
-}
-
-/** Route-level fallback for /hire: header, the five-stop stepper, then one large card — the shape of every step. */
+/** Mirrors the flow's shape: the progress rail, one dominant title, then the single card the step lives in. */
 export default function HireLoading() {
   return (
-    <div role="status" aria-live="polite" aria-busy="true">
+    <div role="status" aria-live="polite" aria-busy="true" className="mx-auto w-full max-w-[720px]">
       <span className="sr-only">Loading the hire flow…</span>
 
-      <div className="mb-6 space-y-2">
-        <Bone className="h-7 w-44" />
-        <Bone className="h-4 w-96 max-w-full" />
+      <div className="mb-7 space-y-2.5">
+        <Skeleton className="h-3.5 w-28 rounded-sm" />
+        <div className="flex gap-1">
+          {Array.from({ length: 5 }, (_, i) => (
+            <Skeleton key={i} className="h-1 flex-1 rounded-full" />
+          ))}
+        </div>
       </div>
 
-      <div className="mb-8 flex items-center gap-3">
-        {Array.from({ length: 5 }, (_, i) => (
-          <div key={i} className="flex flex-1 items-center gap-3">
-            <Bone className="h-7 w-28 rounded-full" />
-            {i < 4 ? <Bone className="h-px flex-1" /> : null}
-          </div>
-        ))}
+      <div className="mb-10 space-y-3">
+        <Skeleton className="h-10 w-3/4 rounded-lg" />
+        <Skeleton className="h-5 w-full max-w-[52ch] rounded-sm" />
       </div>
 
-      <div className="space-y-4 rounded-xl bg-card p-4 ring-1 ring-foreground/10">
-        <Bone className="h-4 w-40" />
-        <Bone className="h-40 w-full" />
-        <div className="flex gap-2">
-          <Bone className="h-8 w-32 rounded-full" />
-          <Bone className="h-8 w-40 rounded-full" />
-          <Bone className="h-8 w-36 rounded-full" />
-        </div>
-        <div className="flex justify-end pt-2">
-          <Bone className="h-8 w-32" />
-        </div>
+      <div className="space-y-4 rounded-xl bg-card p-7 shadow-card">
+        <Skeleton className="h-5 w-2/3 rounded-sm" />
+        <Skeleton className="h-5 w-1/2 rounded-sm" />
+        <Skeleton className="h-36 w-full rounded-lg" />
+      </div>
+
+      <div className="mt-8 flex justify-end">
+        <Skeleton className="h-11 w-36 rounded-full" />
       </div>
     </div>
   );

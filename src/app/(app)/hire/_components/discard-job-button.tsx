@@ -1,26 +1,34 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { discardJobAction } from "../actions";
+import { stepLinkClass } from "./step-bar";
 
-/** "Start over": discards the unstaffed job (questions, spec drafts and any proposal) and returns to Describe. */
-export function DiscardJobButton({ jobId, disabled, label = "Start over" }: { jobId: string; disabled?: boolean; label?: string }) {
+/**
+ * "Discard this job": throws away the description, answers and any draft spec or proposal. Nothing has been
+ * hired yet, so there is nothing else to undo — but it is still a one-way door, hence the confirm.
+ *
+ * Rendered as a danger-coloured text link, never a button: the flow already has its one primary pill.
+ */
+export function DiscardJobLink({ jobId, disabled, label = "Discard this job", className }: { jobId: string; disabled?: boolean; label?: string; className?: string }) {
   const router = useRouter();
   return (
     <ConfirmDialog
       trigger={
-        <Button type="button" variant="ghost" size="sm" disabled={disabled} className="text-muted-foreground">
-          <RotateCcw aria-hidden="true" />
+        <button
+          type="button"
+          disabled={disabled}
+          className={cn(stepLinkClass, "text-footnote text-danger", className)}
+        >
           {label}
-        </Button>
+        </button>
       }
-      title="Start over?"
-      description="This discards the job description, your answers and any draft spec or proposal. Nothing has been hired, so there is nothing else to undo."
-      confirmLabel="Discard and start over"
+      title="Discard this job?"
+      description="This throws away the description, your answers and any draft spec or proposal. Nothing has been hired, so there is nothing else to undo."
+      confirmLabel="Discard"
       destructive
       onConfirm={async () => {
         const result = await discardJobAction(jobId);

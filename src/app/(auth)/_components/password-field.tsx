@@ -1,11 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Eye, EyeOff, Minus } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Check } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { FIELD_LIMITS, passwordChecklist, type PasswordCheckContext } from "../schema";
+import { AuthField, ShowToggle } from "./field";
 
 interface PasswordFieldProps {
   value: string;
@@ -20,7 +19,8 @@ interface PasswordFieldProps {
 
 /**
  * Password input with a live checklist. The list is guidance only — `@/server/account` re-checks every rule
- * and additionally refuses breached passwords, keyboard runs and counting sequences.
+ * and additionally refuses breached passwords, keyboard runs and counting sequences, and its refusal comes
+ * back as the form's inline error.
  */
 export function PasswordField({
   value,
@@ -35,46 +35,39 @@ export function PasswordField({
   const checks = passwordChecklist(value, minLength, context);
 
   return (
-    <div className="flex flex-col gap-2">
-      <Label htmlFor={id}>{label}</Label>
-      <div className="relative">
-        <Input
-          id={id}
-          name="password"
-          type={show ? "text" : "password"}
-          autoComplete="new-password"
-          required
-          maxLength={FIELD_LIMITS.password}
-          className="h-10 pr-10"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          readOnly={readOnly}
-          aria-describedby={`${id}-checklist`}
-        />
-        <div className="absolute inset-y-0 right-1.5 flex items-center">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            onClick={() => setShow((v) => !v)}
-            aria-label={show ? "Hide password" : "Show password"}
-            aria-pressed={show}
-          >
-            {show ? <EyeOff aria-hidden /> : <Eye aria-hidden />}
-          </Button>
-        </div>
-      </div>
+    <div>
+      <AuthField
+        id={id}
+        name="password"
+        label={label}
+        type={show ? "text" : "password"}
+        value={value}
+        onValueChange={onChange}
+        autoComplete="new-password"
+        required
+        maxLength={FIELD_LIMITS.password}
+        readOnly={readOnly}
+        describedBy={`${id}-checklist`}
+        trailing={<ShowToggle shown={show} onToggle={() => setShow((v) => !v)} />}
+      />
 
-      <ul id={`${id}-checklist`} className="mt-1 flex flex-col gap-1 text-xs text-muted-foreground">
+      <ul id={`${id}-checklist`} className="mt-3 flex flex-col gap-1.5">
         {checks.map((check) => (
-          <li key={check.id} className="flex items-start gap-1.5">
-            {check.ok ? (
-              <Check className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
-            ) : (
-              <Minus className="mt-0.5 size-3.5 shrink-0 opacity-50" aria-hidden />
+          <li
+            key={check.id}
+            className={cn(
+              "flex items-start gap-2 text-[13px] leading-[18px] transition-colors duration-200 ease-standard",
+              check.ok ? "text-success" : "text-muted-foreground",
             )}
-            <span className={check.ok ? "text-foreground" : undefined}>{check.label}</span>
+          >
+            <span className="flex size-[18px] shrink-0 items-center justify-center" aria-hidden>
+              {check.ok ? (
+                <Check className="size-3.5" />
+              ) : (
+                <span className="size-[5px] rounded-full bg-current opacity-45" />
+              )}
+            </span>
+            <span>{check.label}</span>
             <span className="sr-only">{check.ok ? " — met" : " — not met yet"}</span>
           </li>
         ))}

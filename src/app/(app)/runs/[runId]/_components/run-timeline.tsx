@@ -1,9 +1,9 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState } from "react";
-import { ChevronDown, Loader2, ShieldCheck } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { formatDuration } from "@/lib/format";
+import { ChevronDown } from "lucide-react";
+import { LiveDot } from "@/components/live-dot";
+import { formatDuration, formatTokens } from "@/lib/format";
 import { TONE_CLASSES } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { RunStepDetailView } from "@/server/queries/runs";
@@ -11,11 +11,12 @@ import type { RunLiveView } from "@/server/runtime/types";
 import { ApprovalDecision } from "./approval-decision";
 import { useRunLive } from "./run-live";
 import { hasDetails, StepDetails } from "./step-details";
-import { STEP_KIND_META, STEP_STATUS_META } from "./step-meta";
+import { STEP_STATUS_META } from "./step-meta";
 
 /**
- * The step-by-step story of a run. Rows come from the live poll (status, title, timing); the expandable
- * bodies come from the server-rendered detail map and fill in on the refresh that follows the last poll.
+ * The step-by-step story of a run: a calm vertical sequence of human sentences, one small state dot each, with
+ * the details a click away. Rows come from the live poll (status, title, timing); the expandable bodies come
+ * from the server-rendered detail map and fill in on the refresh that follows the last poll.
  */
 
 type LiveStep = RunLiveView["steps"][number];
@@ -26,6 +27,8 @@ export interface RunTimelineProps {
   workerName: string;
   /** Server-rendered detail per step id (model/tool calls, approval, I/O). */
   details: Record<string, RunStepDetailView>;
+  /** Whether this viewer's role may decide an approval request. */
+  canDecide?: boolean;
 }
 
 /**
@@ -52,74 +55,123 @@ function elapsed(step: LiveStep, now: number | null): string | null {
   return null;
 }
 
-function StepRow({ step, detail, runId, runStatus, workerId, workerName }: { step: LiveStep; detail: RunStepDetailView | undefined; runId: string; runStatus: string; workerId: string; workerName: string }) {
-  const kind = STEP_KIND_META[step.kind];
+/** Tokens a step spent, when it called a model. */
+function stepTokens(detail: RunStepDetailView | undefined): number {
+  if (!detail) return 0;
+  return detail.modelCalls.reduce((n, c) => n + c.inputTokens + c.outputTokens, 0);
+}
+
+function StepDot({ status }: { status: LiveStep["status"] }) {
+  const meta = STEP_STATUS_META[status];
+  const tone = TONE_CLASSES[meta.tone];
+  const faded = status === "PENDING" || status === "SKIPPED";
+  return (
+    <span className="relative z-10 mt-[7px] flex size-[9px] shrink-0 items-center justify-center" aria-hidden="true">
+      <span className="absolute size-[17px] rounded-full bg-card" />
+      {meta.pulse ? (
+        <span className={cn("absolute size-[9px] rounded-full opacity-60 motion-safe:animate-ping", tone.dot)} />
+      ) : null}
+      <span className={cn("relative size-[9px] rounded-full", tone.dot, faded && "opacity-40")} />
+    </span>
+  );
+}
+
+interface StepRowProps {
+  step: LiveStep;
+  detail: RunStepDetailView | undefined;
+  runId: string;
+  runStatus: string;
+  workerId: string;
+  workerName: string;
+  canDecide?: boolean;
+  last: boolean;
+}
+
+function StepRow({ step, detail, runId, runStatus, workerId, workerName, canDecide, last }: StepRowProps) {
   const status = STEP_STATUS_META[step.status];
   const tone = TONE_CLASSES[status.tone];
   const needsDecision = step.kind === "APPROVAL" && step.status === "WAITING" && runStatus === "WAITING_FOR_APPROVAL";
   const expandable = hasDetails(detail);
   const [open, setOpen] = useState(needsDecision || step.kind === "ERROR" || step.status === "FAILED");
-  const Icon = kind.icon;
   const now = useNow(step.durationMs === null && (step.status === "RUNNING" || step.status === "WAITING"));
   const time = elapsed(step, now);
+  const tokens = stepTokens(detail);
+
+  const heading = (
+    <>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[15px] text-pretty text-foreground">{step.title}</span>
+        {step.detail ? <span className="mt-0.5 block text-footnote text-pretty text-muted-foreground">{step.detail}</span> : null}
+        {step.error && !open ? <span className="mt-0.5 block line-clamp-2 text-footnote text-danger">{step.error}</span> : null}
+        {step.status !== "SUCCEEDED" && step.status !== "PENDING" ? (
+          <span className={cn("mt-0.5 block text-footnote", tone.text)}>{status.label}</span>
+        ) : null}
+      </span>
+      <span className="metric flex shrink-0 items-center gap-2 pt-0.5 text-footnote text-muted-foreground">
+        <span>
+          {time ?? ""}
+          {time && tokens > 0 ? " · " : ""}
+          {tokens > 0 ? `${formatTokens(tokens)} tokens` : ""}
+        </span>
+        {expandable ? (
+          <ChevronDown
+            className={cn("size-3.5 transition-transform duration-200 ease-standard", open && "rotate-180")}
+            aria-hidden="true"
+          />
+        ) : null}
+      </span>
+    </>
+  );
 
   return (
-    <li className={cn("relative flex gap-3 py-3", needsDecision && "-mx-4 rounded-lg bg-amber-50/70 px-4 ring-1 ring-amber-200 ring-inset")}>
-      <div className="relative flex shrink-0 flex-col items-center">
-        <span
-          className={cn(
-            "flex size-7 items-center justify-center rounded-full bg-background ring-1 ring-foreground/10",
-            step.status === "FAILED" && "text-rose-600 ring-rose-200",
-            step.status === "WAITING" && "text-amber-700 ring-amber-300",
-            step.status === "RUNNING" && "text-sky-700 ring-sky-300",
-            step.status === "SUCCEEDED" && "text-muted-foreground",
-            (step.status === "PENDING" || step.status === "SKIPPED") && "text-muted-foreground/60",
-          )}
-        >
-          <Icon className="size-3.5" aria-hidden="true" />
-        </span>
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-pretty">{step.title}</p>
-            {step.detail ? <p className="mt-0.5 text-xs text-muted-foreground">{step.detail}</p> : null}
-            {step.error && !open ? <p className="mt-0.5 line-clamp-2 text-xs text-rose-600">{step.error}</p> : null}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <span className={cn("inline-flex items-center gap-1.5 text-xs", tone.text)}>
-              <span className={cn("size-1.5 rounded-full", tone.dot, status.pulse && "animate-pulse")} aria-hidden="true" />
-              {status.label}
-            </span>
-            <span className="w-14 text-right text-xs tabular-nums text-muted-foreground">{time ?? ""}</span>
-            {expandable ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-expanded={open}
-                aria-label={open ? "Hide details" : "Show details"}
-                onClick={() => setOpen((v) => !v)}
-                className="text-muted-foreground"
-              >
-                <ChevronDown className={cn("transition-transform", open && "rotate-180")} aria-hidden="true" />
-              </Button>
-            ) : (
-              <span className="size-6" aria-hidden="true" />
-            )}
-          </div>
-        </div>
+    <li className="relative flex gap-4">
+      <StepDot status={step.status} />
+      <div className={cn("min-w-0 flex-1", last ? "pb-0" : "pb-6")}>
+        {expandable ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="flex w-full items-start gap-4 rounded-lg text-left outline-none"
+          >
+            {heading}
+          </button>
+        ) : (
+          <div className="flex items-start gap-4">{heading}</div>
+        )}
+
         {open && expandable ? (
-          <div className="mt-3">
-            <StepDetails step={detail} runId={runId} runStatus={runStatus} workerId={workerId} workerName={workerName} />
-          </div>
+          needsDecision ? (
+            <div className="mt-4 rounded-xl bg-card p-5 shadow-card-hover">
+              <p className="mb-4 text-footnote text-muted-foreground">{workerName} needs your go-ahead to carry on.</p>
+              <StepDetails
+                step={detail}
+                runId={runId}
+                runStatus={runStatus}
+                workerId={workerId}
+                workerName={workerName}
+                canDecide={canDecide}
+              />
+            </div>
+          ) : (
+            <div className="mt-3.5 rounded-lg bg-muted p-4">
+              <StepDetails
+                step={detail}
+                runId={runId}
+                runStatus={runStatus}
+                workerId={workerId}
+                workerName={workerName}
+                canDecide={canDecide}
+              />
+            </div>
+          )
         ) : null}
       </div>
     </li>
   );
 }
 
-export function RunTimeline({ runId, workerId, workerName, details }: RunTimelineProps) {
+export function RunTimeline({ runId, workerId, workerName, details, canDecide }: RunTimelineProps) {
   const { live, polling, refresh } = useRunLive();
   const { run, steps } = live;
 
@@ -138,14 +190,14 @@ export function RunTimeline({ runId, workerId, workerName, details }: RunTimelin
 
   if (steps.length === 0) {
     return (
-      <div className="flex items-center gap-3 rounded-lg border border-dashed px-4 py-6 text-sm text-muted-foreground">
-        {polling ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
+      <p className="flex flex-wrap items-center gap-2 py-2 text-[15px] text-muted-foreground">
+        {polling ? <LiveDot label={null} /> : null}
         {run.status === "QUEUED"
           ? `${workerName} is about to start — waiting for a free slot.`
           : run.status === "CANCELLED"
             ? "This run was cancelled before any work started."
             : "No steps were recorded for this run."}
-      </div>
+      </p>
     );
   }
 
@@ -155,51 +207,70 @@ export function RunTimeline({ runId, workerId, workerName, details }: RunTimelin
   // Requests the poller knows about but no WAITING step can show yet (detail not loaded, or a step without a
   // link to its approval): surface them below the timeline so a decision is always one click away.
   const shownApprovalIds = new Set(
-    steps.filter((s) => s.kind === "APPROVAL" && s.status === "WAITING").map((s) => details[s.id]?.approval?.id).filter((id): id is string => !!id),
+    steps
+      .filter((s) => s.kind === "APPROVAL" && s.status === "WAITING")
+      .map((s) => details[s.id]?.approval?.id)
+      .filter((id): id is string => !!id),
   );
   const orphanApprovals = run.status === "WAITING_FOR_APPROVAL" ? live.pendingApprovals.filter((a) => !shownApprovalIds.has(a.id)) : [];
 
   return (
     <div>
-      <ol className="relative divide-y">
-        {steps.map((step) => {
+      {/* One hairline runs the length of the sequence; each dot punches a hole in it with a white ring. */}
+      <ol className="relative before:absolute before:top-3 before:bottom-3 before:left-[4px] before:w-px before:bg-border">
+        {steps.map((step, i) => {
           const divider = multiAttempt && step.attempt !== lastAttempt;
           lastAttempt = step.attempt;
           return (
             <Fragment key={step.id}>
               {divider ? (
-                <li className="pt-3 pb-1">
+                <li className="relative flex gap-4 pb-3">
+                  <span className="z-10 mt-[3px] size-[9px] shrink-0 rounded-full bg-card" aria-hidden="true" />
                   <p className="eyebrow">Attempt {step.attempt}</p>
                 </li>
               ) : null}
-              <StepRow step={step} detail={details[step.id]} runId={runId} runStatus={run.status} workerId={workerId} workerName={workerName} />
+              <StepRow
+                step={step}
+                detail={details[step.id]}
+                runId={runId}
+                runStatus={run.status}
+                workerId={workerId}
+                workerName={workerName}
+                canDecide={canDecide}
+                last={i === steps.length - 1}
+              />
             </Fragment>
           );
         })}
       </ol>
+
       {orphanApprovals.length > 0 ? (
-        <div className="mt-3 space-y-3">
+        <div className="mt-6 space-y-4">
           {orphanApprovals.map((approval) => (
-            <div key={approval.id} className="rounded-lg bg-amber-50/70 p-4 ring-1 ring-amber-200 ring-inset">
-              <p className="mb-3 flex items-center gap-2 text-sm font-medium text-amber-800">
-                <ShieldCheck className="size-4" aria-hidden="true" />
-                {workerName} needs your go-ahead
-              </p>
-              <ApprovalDecision runId={runId} workerId={workerId} workerName={workerName} approval={approval} />
+            <div key={approval.id} className="rounded-xl bg-card p-5 shadow-card-hover">
+              <p className="mb-4 text-footnote text-muted-foreground">{workerName} needs your go-ahead to carry on.</p>
+              <ApprovalDecision
+                runId={runId}
+                workerId={workerId}
+                workerName={workerName}
+                approval={approval}
+                canDecide={canDecide}
+              />
             </div>
           ))}
         </div>
       ) : null}
+
       {polling ? (
-        <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+        <p className="mt-6 flex items-center gap-2 text-footnote text-muted-foreground">
+          <LiveDot label={null} />
           {run.status === "WAITING_FOR_APPROVAL"
             ? `${workerName} is waiting for your decision.`
             : run.status === "QUEUED"
               ? `${workerName} will pick this up in a moment.`
               : live.evaluationPending
                 ? "Checking the deliverable…"
-                : "Live — updates as it happens."}
+                : "Updating as it happens."}
         </p>
       ) : null}
     </div>

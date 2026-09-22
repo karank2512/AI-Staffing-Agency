@@ -11,11 +11,18 @@ import type { WorkerTabProps } from "./types";
 export default async function ChatTab({ session, workerId }: WorkerTabProps) {
   let data: WorkerChatView;
   try {
-    data = await getWorkerChat(session.organizationId, workerId);
+    data = await getWorkerChat(session.organizationId, workerId, { role: session.role });
   } catch (e) {
     if (isAppError(e) && e.code === "NOT_FOUND") notFound();
     throw e;
   }
 
-  return <ChatPanel worker={data.worker} messages={data.messages} pendingInstructions={data.pendingInstructions} />;
+  return (
+    <ChatPanel
+      worker={data.worker}
+      messages={data.messages}
+      pendingInstructions={data.pendingInstructions}
+      canSend={data.permissions["workers.chat"]}
+    />
+  );
 }

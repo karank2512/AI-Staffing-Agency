@@ -1,70 +1,91 @@
+import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { ArrowRight, Briefcase, History, Quote } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { PageHeader } from "@/components/page-header";
-import { RelativeTime } from "@/components/relative-time";
 import { Section } from "@/components/section";
-import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { formatDateTime } from "@/lib/format";
 import { requireSession } from "@/server/auth";
-import { computeNextRunAt, describeCadence } from "@/server/domain";
+import { can } from "@/server/auth/permissions";
 import { isAppError } from "@/server/errors";
-import { getHireView, listOpenHireJobs, type HireView, type OpenHireJob } from "@/server/queries/hire";
+import { getHireView, listOpenHireJobs, type HireView } from "@/server/queries/hire";
 import { ClarifyForm } from "./_components/clarify-form";
 import { DescribeForm } from "./_components/describe-form";
+import { HireProgress } from "./_components/hire-progress";
 import { ProposalActions } from "./_components/proposal-actions";
-import { ProposalCard } from "./_components/proposal-card";
-import { ProposalDetails } from "./_components/proposal-details";
 import { ProposalPending } from "./_components/proposal-pending";
-import { SpecActions } from "./_components/spec-actions";
-import { SpecEditor } from "./_components/spec-editor";
-import { SpecReview } from "./_components/spec-review";
-import { HireStepper } from "./_components/stepper";
-import { stepKeyFor, type HireStepKey } from "./schema";
+import { ProposalPipeline, ProposalRationale, ProposalResume } from "./_components/proposal-profile";
+import { ProposalCost, ProposalJudging, ProposalKpis } from "./_components/proposal-terms";
+import { ResumeList } from "./_components/resume-list";
+import { SpecDocument } from "./_components/spec-document";
+import { exampleJobById, stepKeyFor } from "./schema";
 
 export const metadata: Metadata = { title: "Hire a worker" };
 
-const STEP_COPY: Record<HireStepKey, { title: string; description: string }> = {
-  describe: {
-    title: "Hire a worker",
-    description: "Describe the job in plain English. We scope it, design an AI worker for it, and you hire them — usually in under three minutes.",
-  },
-  clarify: { title: "Hire a worker", description: "A few quick questions so the job spec matches what you meant." },
-  spec: { title: "Review the job spec", description: "This is the contract your worker is hired against. Edit what is off, then approve it to meet your proposed hire." },
-  proposal: { title: "Meet your worker", description: "Here is who we would put on the job. Hire them, ask for a redesign, or go back and adjust the spec." },
-  hired: { title: "Hired", description: "Your worker is on the job." },
-};
+/** The whole flow lives in one 720px reading column — no side rails, no second thing to look at. */
+function Column({ children }: { children: ReactNode }) {
+  return <div className="mx-auto w-full max-w-[720px]">{children}</div>;
+}
+
+/**
+ * The same "‹ Hire" link PageHeader draws, for the two steps that own their own heading (the résumé's `<h1>`
+ * is the worker's name, so it can't come from PageHeader).
+ */
+function BackToHire() {
+  return (
+    <Link href="/hire" className="mb-5 block w-fit rounded-sm text-callout text-link outline-none hover:underline">
+      ‹ Hire
+    </Link>
+  );
+}
 
 /**
  * /hire and /hire?jobId=… — the headline flow. The step is always derived on the server from
  * `staffing.getHireFlowState`; the client only ever submits an action and refreshes.
  */
-export default async function HirePage({ searchParams }: { searchParams: Promise<{ jobId?: string | string[] }> }) {
+export default async function HirePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ jobId?: string | string[]; prefill?: string | string[] }>;
+}) {
   const s = await requireSession();
-  const { jobId: rawJobId } = await searchParams;
+  const { jobId: rawJobId, prefill: rawPrefill } = await searchParams;
   const jobId = Array.isArray(rawJobId) ? rawJobId[0] : rawJobId;
 
   if (!jobId) {
+    const prefillId = Array.isArray(rawPrefill) ? rawPrefill[0] : rawPrefill;
+    const example = exampleJobById(prefillId);
+    const canManage = can(s.role, "jobs.manage");
     const openJobs = await listOpenHireJobs(s.organizationId);
+
     return (
-      <>
-        <PageHeader title={STEP_COPY.describe.title} description={STEP_COPY.describe.description} />
-        <div className="space-y-8">
-          <HireStepper current="describe" />
-          <DescribeForm />
-          {openJobs.length > 0 ? <ResumeList jobs={openJobs} /> : null}
-        </div>
-      </>
+      <Column>
+        <HireProgress current="describe" />
+        <PageHeader
+          title={<span className="block text-headline">What do you need done?</span>}
+          description="Describe it like you would brief a new contractor: the outcome, how often, and who it is for."
+        />
+        {canManage ? (
+          <DescribeForm initialText={example?.description ?? ""} />
+        ) : (
+          <NoAccess
+            title="Only admins can open a new job"
+            description="You can follow every worker, run and deliverable in the workspace — but scoping a job and hiring for it is an admin's call."
+          />
+        )}
+        {openJobs.length > 0 ? (
+          <div className="mt-14">
+            <ResumeList jobs={openJobs} />
+          </div>
+        ) : null}
+      </Column>
     );
   }
 
   let view: HireView;
   try {
-    view = await getHireView(s.organizationId, jobId);
+    view = await getHireView(s.organizationId, jobId, { role: s.role });
   } catch (e) {
     if (isAppError(e) && e.code === "NOT_FOUND") notFound();
     throw e;
@@ -76,140 +97,130 @@ export default async function HirePage({ searchParams }: { searchParams: Promise
     return <ClosedJob jobId={view.jobId} status={view.status} />;
   }
 
-  const { state, toolMeta, familyLabel } = view;
+  const { state, toolMeta, familyLabel, permissions } = view;
+  const canManage = permissions["jobs.manage"];
   const step = stepKeyFor(state.step);
-  const copy = STEP_COPY[step];
 
+  if (step === "clarify") {
+    const questions = state.intake?.questions ?? [];
+    return (
+      <Column>
+        <HireProgress current="clarify" />
+        <PageHeader
+          title={<span className="block text-headline">{questions.length > 0 ? "A few quick questions" : "Ready for a spec"}</span>}
+          description={
+            questions.length > 0
+              ? "They shape the job spec. Skip anything you are unsure about — sensible defaults apply."
+              : "Nothing else to ask. Draft the spec and check it over."
+          }
+          backHref="/hire"
+          backLabel="Hire"
+        />
+        <div className="mb-8 space-y-1.5">
+          <p className="text-footnote text-muted-foreground">Your brief · {familyLabel}</p>
+          <p className="text-callout whitespace-pre-line text-pretty text-muted-foreground">{state.job.description}</p>
+        </div>
+        <ClarifyForm
+          jobId={state.job.id}
+          jobTitle={state.job.title}
+          questions={questions}
+          initialAnswers={state.intake?.answers ?? {}}
+          canManage={canManage}
+        />
+      </Column>
+    );
+  }
+
+  if (step === "spec" && state.spec && state.jobSpecId) {
+    return (
+      <Column>
+        <HireProgress current="spec" />
+        <SpecDocument
+          jobId={state.job.id}
+          jobSpecId={state.jobSpecId}
+          spec={state.spec}
+          toolMeta={toolMeta}
+          showTargetCount={state.spec.deliverable.fields.length > 0 || state.spec.deliverable.targetCount !== undefined}
+          canManage={canManage}
+        />
+      </Column>
+    );
+  }
+
+  if (step === "proposal" && state.spec) {
+    if (!state.proposal) {
+      return (
+        <Column>
+          <HireProgress current="proposal" />
+          <BackToHire />
+          <ProposalPending jobId={state.job.id} specTitle={state.spec.title} canManage={canManage} />
+        </Column>
+      );
+    }
+
+    const { proposal } = state;
+    return (
+      <Column>
+        <HireProgress current="proposal" />
+        <BackToHire />
+        <ProposalResume proposal={proposal} toolMeta={toolMeta} />
+        <div className="mt-14 space-y-14">
+          <Section title="Why this design" description={`How the staffing engine matched “${state.spec.title}”.`}>
+            <ProposalRationale proposal={proposal} />
+          </Section>
+          <Section title="How the work flows" description="Every run walks these steps in order.">
+            <ProposalPipeline proposal={proposal} jobTitle={state.spec.title} />
+          </Section>
+          <Section title="What they are measured on">
+            <ProposalKpis proposal={proposal} />
+          </Section>
+          <Section title="Cost and schedule">
+            <ProposalCost proposal={proposal} />
+          </Section>
+          <Section title="How the work gets reviewed">
+            <ProposalJudging proposal={proposal} />
+          </Section>
+        </div>
+        <ProposalActions
+          jobId={state.job.id}
+          proposedName={proposal.blueprint.persona.name}
+          simulated={proposal.simulated}
+          canHire={permissions["workers.hire"]}
+          canManage={canManage}
+        />
+      </Column>
+    );
+  }
+
+  // Defensive: the flow state is always one of the three steps above, but never render a blank page.
   return (
-    <>
-      <PageHeader
-        title={copy.title}
-        description={copy.description}
-        breadcrumbs={[{ label: "Hire", href: "/hire" }, { label: state.job.title }]}
-        actions={
-          <>
-            <StatusBadge kind="job" status={state.job.status} />
-            <Button variant="outline" size="sm" asChild>
-              <Link href={`/jobs/${state.job.id}`}>
-                <Briefcase aria-hidden="true" />
-                View job
-              </Link>
-            </Button>
-          </>
-        }
-      />
-      <div className="space-y-8">
-        <HireStepper current={step} />
-
-        {step === "clarify" ? (
-          <div className="space-y-4">
-            <Card size="sm" className="bg-muted/40">
-              <CardContent className="flex gap-3">
-                <Quote className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                <div className="min-w-0 space-y-1">
-                  <p className="eyebrow">
-                    Your description · {familyLabel}
-                  </p>
-                  <p className="text-sm whitespace-pre-line text-pretty text-muted-foreground">{state.job.description}</p>
-                </div>
-              </CardContent>
-            </Card>
-            <ClarifyForm jobId={state.job.id} jobTitle={state.job.title} questions={state.intake?.questions ?? []} initialAnswers={state.intake?.answers ?? {}} />
-          </div>
-        ) : null}
-
-        {step === "spec" && state.spec && state.jobSpecId ? (
-          <div className="space-y-4">
-            <SpecEditor
-              jobId={state.job.id}
-              jobSpecId={state.jobSpecId}
-              familyLabel={familyLabel}
-              statusLabel="Draft spec"
-              title={state.spec.title}
-              summary={state.spec.summary}
-              objective={state.spec.objective}
-              responsibilities={state.spec.responsibilities}
-              cadence={state.spec.cadence}
-              targetCount={state.spec.deliverable.targetCount ?? null}
-              showTargetCount={state.spec.deliverable.fields.length > 0 || state.spec.deliverable.targetCount !== undefined}
-            />
-            <SpecReview spec={state.spec} toolMeta={toolMeta} />
-            <SpecActions jobId={state.job.id} jobSpecId={state.jobSpecId} specTitle={state.spec.title} />
-          </div>
-        ) : null}
-
-        {step === "proposal" && state.spec ? (
-          state.proposal ? (
-            <div className="grid gap-6 lg:grid-cols-3">
-              <div className="space-y-4 lg:col-span-2">
-                <ProposalCard proposal={state.proposal} jobTitle={state.spec.title} toolMeta={toolMeta} />
-                <ProposalDetails proposal={state.proposal} />
-              </div>
-              <aside className="self-start">
-                <ProposalActions
-                  jobId={state.job.id}
-                  proposedName={state.proposal.blueprint.persona.name}
-                  title={state.spec.title}
-                  perRunUsd={state.proposal.blueprint.costEstimate.perRunUsd}
-                  monthlyUsd={state.proposal.blueprint.costEstimate.monthlyUsd}
-                  cadenceLabel={describeCadence(state.proposal.blueprint.schedule)}
-                  firstRunLabel={firstRunLabel(state.proposal.blueprint.schedule)}
-                  simulated={state.proposal.simulated}
-                />
-              </aside>
-            </div>
-          ) : (
-            <ProposalPending jobId={state.job.id} specTitle={state.spec.title} />
-          )
-        ) : null}
-      </div>
-    </>
+    <Column>
+      <HireProgress current={step} />
+      <NoAccess title="This job is between steps" description="Refresh in a moment, or start again from your list of open jobs." />
+    </Column>
   );
 }
 
-/** "First run starts on hire; then …" — the schedule math is the same the hire uses, evaluated now for display. */
-function firstRunLabel(schedule: Parameters<typeof computeNextRunAt>[0]): string {
-  const next = computeNextRunAt(schedule, new Date());
-  return next ? `First run on hire, then ${formatDateTime(next)}` : "First run on hire, then whenever you ask";
-}
-
-function ResumeList({ jobs }: { jobs: OpenHireJob[] }) {
+function NoAccess({ title, description }: { title: string; description: string }) {
   return (
-    <Section title="Pick up where you left off" description="Jobs you started scoping but have not hired for yet.">
-      <Card>
-        <CardContent>
-          <ul className="divide-y">
-            {jobs.map((job) => (
-              <li key={job.id}>
-                <Link href={`/hire?jobId=${encodeURIComponent(job.id)}`} className="group flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                  <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-foreground/5">
-                    <History className="size-4" aria-hidden="true" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium group-hover:underline">{job.title}</span>
-                    <span className="block text-xs text-muted-foreground">
-                      {job.familyLabel} · updated <RelativeTime iso={job.updatedAt} />
-                    </span>
-                  </span>
-                  <StatusBadge kind="job" status={job.status} />
-                  <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
-    </Section>
+    <EmptyState
+      title={title}
+      description={description}
+      action={
+        <Button variant="secondary" size="lg" asChild>
+          <Link href="/workforce">Go to Workforce</Link>
+        </Button>
+      }
+    />
   );
 }
 
 function ClosedJob({ jobId, status }: { jobId: string; status: string }) {
   const paused = status === "PAUSED";
   return (
-    <>
-      <PageHeader title="Hire a worker" description="This job is not open for hiring." breadcrumbs={[{ label: "Hire", href: "/hire" }, { label: "Job" }]} />
+    <Column>
+      <PageHeader title="Hire a worker" description="This job is not open for hiring." backHref="/jobs" backLabel="Jobs" />
       <EmptyState
-        icon={Briefcase}
         title={paused ? "This job is paused" : "This job is closed"}
         description={
           paused
@@ -218,15 +229,15 @@ function ClosedJob({ jobId, status }: { jobId: string; status: string }) {
         }
         action={
           <>
-            <Button asChild>
+            <Button size="lg" asChild>
               <Link href="/hire">Describe a new job</Link>
             </Button>
-            <Button variant="outline" asChild>
+            <Button variant="secondary" size="lg" asChild>
               <Link href={`/jobs/${jobId}`}>Open job</Link>
             </Button>
           </>
         }
       />
-    </>
+    </Column>
   );
 }

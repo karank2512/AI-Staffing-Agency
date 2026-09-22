@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { BriefcaseBusiness, LinkIcon } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getInvitationByToken } from "@/server/account";
 import { SIGN_IN_PATH } from "@/server/auth";
 import { config } from "@/server/config";
+import { AuthHeader } from "../../_components/form-ui";
 import { AcceptInviteForm } from "./accept-invite-form";
 
-export const metadata: Metadata = { title: "Join a workspace" };
+export const metadata: Metadata = {
+  title: "Join a workspace",
+  description: "Accept your invitation and join your team's AI Staffing Agency workspace.",
+  robots: { index: false, follow: false },
+};
 
 const ROLE_COPY: Record<string, string> = {
   MEMBER: "You'll be able to run workers, review their work and decide approvals.",
@@ -24,54 +26,43 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   const { token } = await params;
   const invitation = await getInvitationByToken(token);
 
+  if (!invitation) {
+    return (
+      <>
+        <AuthHeader
+          title="This invite has expired"
+          description="Invite links run out after a while, and each one works only once. Ask whoever invited you to send a fresh link from their workspace settings."
+        />
+        <p className="text-[15px] leading-[22px] text-muted-foreground">
+          Already have an account?{" "}
+          <Link href={SIGN_IN_PATH} className="font-medium text-link hover:underline">
+            Sign in <span aria-hidden>›</span>
+          </Link>
+        </p>
+      </>
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-8">
-      <header className="flex flex-col items-center gap-3 text-center">
-        <div className="flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm ring-1 ring-foreground/10">
-          <BriefcaseBusiness className="size-5" aria-hidden />
-        </div>
-        <div className="space-y-1">
-          <p className="font-heading text-xl font-semibold tracking-tight">AI Staffing Agency</p>
-          <p className="text-sm text-muted-foreground">Hire AI workers like contractors.</p>
-        </div>
-      </header>
+    <>
+      <AuthHeader
+        title={`Join ${invitation.organizationName}`}
+        description={ROLE_COPY[invitation.role] ?? "You'll be able to work alongside the rest of the team."}
+      />
 
-      <Card className="shadow-sm [--card-spacing:--spacing(6)]">
-        <CardHeader>
-          <CardTitle>
-            <h1>{invitation ? `Join ${invitation.organizationName}` : "This invite isn't valid"}</h1>
-          </CardTitle>
-          <CardDescription>
-            {invitation
-              ? ROLE_COPY[invitation.role]
-              : "Invite links expire, and each one can only be used once."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {invitation ? (
-            <AcceptInviteForm
-              token={token}
-              email={invitation.email}
-              organizationName={invitation.organizationName}
-              passwordMinLength={config.auth.passwordMinLength}
-            />
-          ) : (
-            <Alert>
-              <LinkIcon aria-hidden />
-              <AlertDescription>
-                Ask whoever invited you to send a fresh link from their workspace settings.
-              </AlertDescription>
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
+      <AcceptInviteForm
+        token={token}
+        email={invitation.email}
+        organizationName={invitation.organizationName}
+        passwordMinLength={config.auth.passwordMinLength}
+      />
 
-      <p className="text-center text-sm text-muted-foreground">
+      <p className="mt-10 border-t border-border pt-6 text-[15px] leading-[22px] text-muted-foreground">
         Already have an account?{" "}
-        <Link href={SIGN_IN_PATH} className="font-medium text-foreground underline underline-offset-4">
-          Sign in
+        <Link href={SIGN_IN_PATH} className="font-medium text-link hover:underline">
+          Sign in <span aria-hidden>›</span>
         </Link>
       </p>
-    </div>
+    </>
   );
 }

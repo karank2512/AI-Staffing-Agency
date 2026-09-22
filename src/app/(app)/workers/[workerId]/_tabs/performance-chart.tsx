@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { SCORE_BAND_CLASSES, scoreBand } from "@/lib/status";
 import { cn } from "@/lib/utils";
@@ -23,27 +23,31 @@ export interface PerformanceChartProps {
 
 interface Datum extends ScoreTrendPoint {
   index: number;
-  t: number;
 }
 
-const AXIS_TICK = { fill: "var(--muted-foreground)", fontSize: 11 } as const;
+const AXIS_TICK = { fill: "var(--chart-axis)", fontSize: 12 } as const;
 
 /**
- * Per-run score, chronological (single series: no legend — the title names it). Clicking a point opens the run.
- * Reference lines mark the health bands the ScoreRing uses, so "why is Alex amber?" is visible at a glance.
+ * Per-run score, oldest to newest. One 2px line with a whisper of fill, dots only on hover, and the two bands
+ * the score is read against drawn as dashed reference lines. Clicking a point opens that run.
  */
 export function PerformanceChart({ points, workerName, className }: PerformanceChartProps) {
   const router = useRouter();
-  const data = useMemo<Datum[]>(() => points.map((p, index) => ({ ...p, index, t: new Date(p.at).getTime() })), [points]);
-
+  const data = useMemo<Datum[]>(() => points.map((p, index) => ({ ...p, index })), [points]);
   // Sequential x-position (not time) keeps bursts of runs readable; the tooltip carries the real timestamp.
-  const tickEvery = Math.max(1, Math.ceil(data.length / 6));
+  const tickEvery = Math.max(1, Math.ceil(data.length / 5));
 
   return (
-    <div className={cn("h-56 w-full", className)} role="img" aria-label={`${workerName}'s score per run, oldest to newest`}>
+    <div className={cn("h-60 w-full", className)} role="img" aria-label={`${workerName}'s score per run, oldest to newest`}>
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 12, right: 12, bottom: 4, left: -16 }}>
-          <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="0" />
+        <AreaChart data={data} margin={{ top: 16, right: 44, bottom: 4, left: -16 }}>
+          <defs>
+            <linearGradient id="score-fill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.08} />
+              <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid vertical={false} stroke="var(--chart-grid)" />
           <XAxis
             dataKey="index"
             type="number"
@@ -52,38 +56,48 @@ export function PerformanceChart({ points, workerName, className }: PerformanceC
             tickFormatter={(i: number) => (data[i] ? formatDate(data[i].at).replace(/, \d{4}$/, "") : "")}
             tick={AXIS_TICK}
             tickLine={false}
-            axisLine={{ stroke: "var(--border)" }}
+            axisLine={false}
             minTickGap={24}
           />
-          <YAxis domain={[0, 100]} ticks={[0, 25, 50, 65, 80, 100]} tick={AXIS_TICK} tickLine={false} axisLine={false} width={44} />
-          <ReferenceLine y={80} stroke="var(--chart-3)" strokeDasharray="4 4" strokeOpacity={0.6} />
-          <ReferenceLine y={65} stroke="var(--chart-4)" strokeDasharray="4 4" strokeOpacity={0.7} />
+          <YAxis domain={[0, 100]} ticks={[0, 50, 65, 80, 100]} tick={AXIS_TICK} tickLine={false} axisLine={false} width={44} />
+          <ReferenceLine
+            y={80}
+            stroke="var(--input)"
+            strokeDasharray="4 4"
+            label={{ value: "Strong", position: "right", fill: "var(--chart-axis)", fontSize: 12 }}
+          />
+          <ReferenceLine
+            y={65}
+            stroke="var(--input)"
+            strokeDasharray="4 4"
+            label={{ value: "Watch", position: "right", fill: "var(--chart-axis)", fontSize: 12 }}
+          />
           <Tooltip
-            cursor={{ stroke: "var(--muted-foreground)", strokeWidth: 1, strokeDasharray: "3 3" }}
+            cursor={{ stroke: "var(--input)", strokeWidth: 1 }}
             content={({ active, payload }) => {
               const d = active && payload && payload.length > 0 ? (payload[0].payload as Datum) : null;
               if (!d) return null;
               const band = SCORE_BAND_CLASSES[scoreBand(d.score)];
               return (
-                <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-sm">
+                <div className="material-thick text-footnote rounded-lg px-3 py-2 shadow-popover">
                   <p className="text-muted-foreground">{formatDateTime(d.at)}</p>
                   <p className="mt-0.5 flex items-baseline gap-1.5">
-                    <span className="metric text-base font-semibold text-foreground">{Math.round(d.score)}</span>
-                    <span className={cn("font-medium", band.text)}>{band.label}</span>
+                    <span className="metric text-[15px] font-semibold text-foreground">{Math.round(d.score)}</span>
+                    <span className={band.text}>{band.label}</span>
                   </p>
-                  <p className="mt-0.5 text-muted-foreground">Click to open the run</p>
                 </div>
               );
             }}
           />
-          <Line
+          <Area
             type="monotone"
             dataKey="score"
             stroke="var(--chart-1)"
             strokeWidth={2}
-            dot={{ r: 4, strokeWidth: 2, stroke: "var(--card)", fill: "var(--chart-1)" }}
+            fill="url(#score-fill)"
+            dot={false}
             activeDot={{
-              r: 6,
+              r: 4,
               strokeWidth: 2,
               stroke: "var(--card)",
               fill: "var(--chart-1)",
@@ -95,7 +109,7 @@ export function PerformanceChart({ points, workerName, className }: PerformanceC
             }}
             isAnimationActive={false}
           />
-        </LineChart>
+        </AreaChart>
       </ResponsiveContainer>
     </div>
   );

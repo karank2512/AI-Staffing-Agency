@@ -1,447 +1,351 @@
 import Link from "next/link";
-import {
-  ArrowDownWideNarrow,
-  ArrowRight,
-  Bot,
-  CheckCircle2,
-  Circle,
-  CopyMinus,
-  FileSpreadsheet,
-  FileText,
-  Filter,
-  Gauge,
-  History,
-  Inbox,
-  MinusCircle,
-  ShieldCheck,
-  Sigma,
-  Workflow,
-  XCircle,
-  type LucideIcon,
-} from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { RelativeTime } from "@/components/relative-time";
 import { Section } from "@/components/section";
+import { Stat, StatStrip } from "@/components/stat-card";
 import { StatusBadge } from "@/components/status-badge";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDuration, formatNumber, formatPercent, formatUsd, formatUsdPrecise, pluralize } from "@/lib/format";
-import { TONE_CLASSES } from "@/lib/status";
+import { Card, CardContent } from "@/components/ui/card";
+import { formatPercent, formatUsd, formatUsdPrecise, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { toDbDeliverableFormat } from "@/server/domain";
 import { getWorkerOverview, type ActiveVersionRef, type PipelineStep, type WorkerReviewRow } from "@/server/queries/worker-profile";
-import { GenerateReviewButton } from "../_components/generate-review";
 import { formatKpiValue, kpiVerdict } from "../_components/kpi-format";
-import { beforeChangeLabel, formatLabel, operationLabel, RECOMMENDATION_META } from "../_components/labels";
+import { beforeChangeLabel, operationLabel, RECOMMENDATION_META } from "../_components/labels";
+import { Row, RowList, RowMeta, RowTitle, Sep } from "../_components/rows";
 import { RunsTable } from "../_components/runs-table";
 import { TierChip } from "../_components/tier-chip";
 import type { WorkerTabProps } from "./types";
 
-const OPERATION_ICONS: Record<string, LucideIcon> = {
-  validate_records: ShieldCheck,
-  dedupe: CopyMinus,
-  rank: ArrowDownWideNarrow,
-  filter: Filter,
-  compute_stats: Sigma,
-  to_csv: FileSpreadsheet,
-  compile_report: FileText,
-};
-
 export default async function OverviewTab({ session, workerId, workerName }: WorkerTabProps) {
   const data = await getWorkerOverview(session.organizationId, workerId);
   const review = data.latestReview;
+  const { metrics } = data;
   const href = (tab: string) => `/workers/${workerId}?tab=${tab}`;
+  const successRate = metrics.runs > 0 ? metrics.succeeded / metrics.runs : null;
+  const reviewed = metrics.accepted + metrics.rejected;
 
   return (
     <>
-      {/* A verdict only drives the page while it is about the version running today; once Sam has been replaced
-          (or changed), an old "replace" call is history and must not push the user to replace the new version. */}
+      {/* A verdict only drives the page while it is about the version running today; once the worker has been
+          replaced (or changed), an old "replace" call is history and must not push the user to act on it. */}
       {review && review.recommendation !== "KEEP" ? (
         review.forCurrentVersion ? (
-          <ReviewBanner workerId={workerId} workerName={workerName} recommendation={review.recommendation} detail={review.recommendationDetail} createdAt={review.createdAt} />
+          <ReviewNote workerId={workerId} workerName={workerName} review={review} />
         ) : data.activeVersion ? (
           <StaleReviewNote workerId={workerId} workerName={workerName} review={review} active={data.activeVersion} />
         ) : null
       ) : null}
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="space-y-6 lg:col-span-2">
+      <StatStrip>
+        <Stat
+          label={`Runs, last ${metrics.windowDays} days`}
+          value={metrics.runs}
+          hint={metrics.runs === 0 ? "Nothing yet" : `${metrics.failed} failed`}
+        />
+        <Stat
+          label="Finished cleanly"
+          value={successRate === null ? "—" : formatPercent(successRate)}
+          hint={metrics.runs > 0 ? `${metrics.succeeded} of ${pluralize(metrics.runs, "run")}` : "No runs to judge"}
+        />
+        <Stat
+          label="Work accepted"
+          value={reviewed > 0 ? formatPercent(metrics.accepted / reviewed) : "—"}
+          hint={reviewed > 0 ? `${metrics.accepted} accepted · ${metrics.rejected} sent back` : "Nothing reviewed yet"}
+        />
+        <Stat
+          label="Spend so far"
+          value={formatUsd(metrics.totalCostUsd)}
+          hint={`${formatUsdPrecise(metrics.avgCostPerRunUsd)} a run`}
+        />
+      </StatStrip>
+
+      <Section title={`About ${workerName}`} description={data.summary ?? undefined}>
+        {data.responsibilities.length === 0 ? (
           <Card>
-            <CardHeader>
-              <CardTitle>About {workerName}</CardTitle>
-              {data.summary ? <CardDescription>{data.summary}</CardDescription> : null}
-              {data.jobFamily ? (
-                <CardAction>
-                  <Badge variant="outline">{data.jobFamily.replace(/_/g, " ")}</Badge>
-                </CardAction>
-              ) : null}
-            </CardHeader>
             <CardContent>
-              {data.responsibilities.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No active version — responsibilities appear once {workerName} has one.</p>
-              ) : (
-                <>
-                  <p className="eyebrow mb-2">Responsibilities</p>
-                  <ul className="grid gap-2 sm:grid-cols-2">
-                    {data.responsibilities.map((r) => (
-                      <li key={r} className="flex items-start gap-2 text-sm">
-                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" aria-hidden="true" />
-                        <span>{r}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
+              <p className="text-muted-foreground">
+                {workerName} has no active version, so there is nothing to describe yet.
+              </p>
             </CardContent>
           </Card>
+        ) : (
+          <RowList>
+            {data.responsibilities.map((r) => (
+              <Row key={r}>
+                <p className="text-[15px] text-pretty">{r}</p>
+              </Row>
+            ))}
+          </RowList>
+        )}
+      </Section>
 
+      <Section
+        title={`How ${workerName} works`}
+        description={`Every run goes through these steps in order. ${
+          data.deliverable ? `It ends with “${data.deliverable.titleTemplate}”.` : ""
+        }`}
+        actions={
+          <Button variant="link" asChild>
+            <Link href={href("permissions")}>
+              Tools and access <ChevronRight data-icon="inline-end" />
+            </Link>
+          </Button>
+        }
+      >
+        {data.pipeline.length === 0 ? (
           <Card>
-            <CardHeader>
-              <CardTitle>How {workerName} works</CardTitle>
-              <CardDescription>
-                Each run goes through these steps in order. Model steps think; the rest are plain code — reliable and free.
-              </CardDescription>
-              {data.deliverable ? (
-                <CardAction>
-                  <Badge variant="secondary">Produces a {formatLabel(toDbDeliverableFormat(data.deliverable.format)).toLowerCase()}</Badge>
-                </CardAction>
-              ) : null}
-            </CardHeader>
             <CardContent>
-              {data.pipeline.length === 0 ? (
-                <EmptyState icon={Workflow} title="No pipeline yet" description="This worker has no active version." className="py-8" />
-              ) : (
-                <Pipeline steps={data.pipeline} />
-              )}
+              <EmptyState
+                title="No working steps yet"
+                description={`${workerName} has no active version, so there is no pipeline to show.`}
+                className="py-12"
+              />
             </CardContent>
           </Card>
+        ) : (
+          <>
+            <RowList>
+              {data.pipeline.map((step, index) => (
+                <PipelineRow key={step.id} step={step} index={index} />
+              ))}
+            </RowList>
+            {data.tools.length > 0 ? (
+              <p className="text-footnote mt-4 text-pretty text-muted-foreground">
+                {toolSentence(workerName, data.tools)}{" "}
+                <Link href={href("permissions")} className="text-link hover:underline">
+                  Change what they can touch ›
+                </Link>
+              </p>
+            ) : null}
+          </>
+        )}
+      </Section>
 
-          <Section
-            title="Recent runs"
-            description={`The last ${data.recentRuns.length === 1 ? "run" : `${data.recentRuns.length} runs`} of ${workerName}.`}
-            actions={
-              <Button variant="outline" size="sm" asChild>
-                <Link href={href("activity")}>View all</Link>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Section
+          className="flex flex-col"
+          title="Targets"
+          description={`What ${workerName} was hired to hit, over the last ${metrics.windowDays} days.`}
+        >
+          <Card className="flex-1 gap-0 py-0">
+            {data.kpis.length === 0 ? (
+              <CardContent className="py-6">
+                <p className="text-muted-foreground">No targets were set for this job.</p>
+              </CardContent>
+            ) : (
+              <ul role="list" className="flex flex-col">
+                {data.kpis.map((kpi) => {
+                  const verdict = kpiVerdict(kpi);
+                  return (
+                    <Row key={kpi.kpiId} className="items-center">
+                      <div className="min-w-0 flex-1">
+                        <RowTitle>{kpi.name}</RowTitle>
+                        <RowMeta>
+                          <span>
+                            Target {kpi.direction === "lower_is_better" ? "at most" : "at least"}{" "}
+                            <span className="metric">{formatKpiValue(kpi.metric, kpi.target)}</span>
+                          </span>
+                          <Sep />
+                          <span
+                            className={cn(
+                              verdict === "met" ? "text-success" : verdict === "missed" ? "text-danger" : "",
+                            )}
+                          >
+                            {verdict === "met" ? "On target" : verdict === "missed" ? "Behind" : "Not enough data"}
+                          </span>
+                        </RowMeta>
+                      </div>
+                      <span className="metric shrink-0 text-[17px] font-semibold">
+                        {formatKpiValue(kpi.metric, kpi.actual)}
+                      </span>
+                    </Row>
+                  );
+                })}
+                {data.cost.estimatedPerRunUsd !== null ? (
+                  <Row className="items-center">
+                    <div className="min-w-0 flex-1">
+                      <RowTitle>Cost per run</RowTitle>
+                      <RowMeta>
+                        <span>
+                          Planned <span className="metric">{formatUsdPrecise(data.cost.estimatedPerRunUsd)}</span>
+                        </span>
+                        <Sep />
+                        <span>{costVerdict(data.cost.estimatedPerRunUsd, data.cost.actualAvgPerRunUsd)}</span>
+                      </RowMeta>
+                    </div>
+                    <span className="metric shrink-0 text-[17px] font-semibold">
+                      {formatUsdPrecise(data.cost.actualAvgPerRunUsd)}
+                    </span>
+                  </Row>
+                ) : null}
+              </ul>
+            )}
+          </Card>
+        </Section>
+
+        <Section
+          className="flex flex-col"
+          title="Latest deliverable"
+          description={
+            data.latestDeliverable ? undefined : `Everything ${workerName} produces will show up here.`
+          }
+          actions={
+            data.latestDeliverable ? (
+              <Button variant="link" asChild>
+                <Link href={href("deliverables")}>
+                  All deliverables <ChevronRight data-icon="inline-end" />
+                </Link>
               </Button>
-            }
-          >
-            <Card className="py-0">
-              <RunsTable runs={data.recentRuns} workerName={workerName} compact />
-            </Card>
-          </Section>
-        </div>
-
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Targets</CardTitle>
-              <CardDescription>What {workerName} was hired to hit, over the last {data.metrics.windowDays} days.</CardDescription>
-              <CardAction>
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href={href("performance")}>
-                    Details
-                    <ArrowRight aria-hidden="true" />
-                  </Link>
-                </Button>
-              </CardAction>
-            </CardHeader>
-            <CardContent>
-              {data.kpis.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No targets defined.</p>
-              ) : (
-                <ul className="divide-y">
-                  {data.kpis.map((kpi) => {
-                    const verdict = kpiVerdict(kpi);
-                    const Icon = verdict === "met" ? CheckCircle2 : verdict === "missed" ? XCircle : MinusCircle;
-                    const tone = verdict === "met" ? "text-emerald-500" : verdict === "missed" ? "text-rose-500" : "text-slate-400";
-                    return (
-                      <li key={kpi.kpiId} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                        <Icon className={cn("size-4 shrink-0", tone)} aria-hidden="true" />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{kpi.name}</p>
-                          <p className="text-xs text-muted-foreground">
-                            Target {kpi.direction === "lower_is_better" ? "≤" : "≥"} {formatKpiValue(kpi.metric, kpi.target)}
-                          </p>
-                        </div>
-                        <p className="metric text-sm font-semibold">{formatKpiValue(kpi.metric, kpi.actual)}</p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Latest deliverable</CardTitle>
-              <CardAction>
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href={href("deliverables")}>
-                    All
-                    <ArrowRight aria-hidden="true" />
-                  </Link>
-                </Button>
-              </CardAction>
-            </CardHeader>
-            <CardContent>
+            ) : undefined
+          }
+        >
+          <Card className="flex-1">
+            <CardContent className="flex h-full flex-col">
               {data.latestDeliverable ? (
-                <div className="space-y-2">
-                  <Link href={`/deliverables/${data.latestDeliverable.id}`} className="block text-sm font-medium underline-offset-4 hover:underline">
+                <>
+                  <Link
+                    href={`/deliverables/${data.latestDeliverable.id}`}
+                    className="text-title-3 text-pretty hover:text-link"
+                  >
                     {data.latestDeliverable.title}
                   </Link>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge kind="deliverable" status={data.latestDeliverable.status} />
-                    <Badge variant="outline">{formatLabel(data.latestDeliverable.format)}</Badge>
+                  <p className="text-footnote mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
+                    <StatusBadge kind="deliverable" status={data.latestDeliverable.status} emphasis="dot" />
+                    <Sep />
+                    <RelativeTime iso={data.latestDeliverable.createdAt} />
                     {data.latestDeliverable.recordCount !== null ? (
-                      <span className="text-xs text-muted-foreground">{pluralize(data.latestDeliverable.recordCount, "record")}</span>
+                      <>
+                        <Sep />
+                        <span>{pluralize(data.latestDeliverable.recordCount, "record")}</span>
+                      </>
                     ) : null}
-                  </div>
+                  </p>
                   {data.latestDeliverable.summary ? (
-                    <p className="line-clamp-3 text-sm text-muted-foreground">{data.latestDeliverable.summary}</p>
+                    <p className="mt-4 line-clamp-3 text-[15px] text-pretty text-muted-foreground">
+                      {data.latestDeliverable.summary}
+                    </p>
                   ) : null}
-                  <p className="text-xs text-muted-foreground">
-                    {workerName} delivered this <RelativeTime iso={data.latestDeliverable.createdAt} /> ·{" "}
-                    <Link href={`/runs/${data.latestDeliverable.runId}`} className="text-primary underline-offset-4 hover:underline">
-                      see the run
+                  <p className="mt-auto pt-5">
+                    <Link
+                      href={`/deliverables/${data.latestDeliverable.id}`}
+                      className="text-[15px] font-medium text-link hover:underline"
+                    >
+                      {data.latestDeliverable.status === "PENDING_REVIEW" ? "Read and review" : "Read it"} ›
                     </Link>
                   </p>
-                </div>
+                </>
               ) : (
-                <EmptyState icon={Inbox} title="Nothing delivered yet" description={`${workerName}'s first deliverable will show up here.`} className="py-6" />
+                <EmptyState
+                  title="Nothing delivered yet"
+                  description={`${workerName}'s first finished run will leave its work here.`}
+                  className="py-12"
+                />
               )}
             </CardContent>
           </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Cost per run</CardTitle>
-              <CardDescription>Estimate from the blueprint vs what runs actually cost.</CardDescription>
-              <CardAction>
-                <Button variant="ghost" size="sm" asChild>
-                  <Link href={href("cost")}>
-                    Details
-                    <ArrowRight aria-hidden="true" />
-                  </Link>
-                </Button>
-              </CardAction>
-            </CardHeader>
-            <CardContent>
-              <CostComparison estimated={data.cost.estimatedPerRunUsd} actual={data.cost.actualAvgPerRunUsd} runs={data.metrics.runs} />
-              <dl className="mt-4 grid grid-cols-2 gap-3 border-t pt-3 text-sm">
-                <div>
-                  <dt className="text-xs text-muted-foreground">Planned monthly</dt>
-                  <dd className="metric font-medium">{formatUsd(data.cost.estimatedMonthlyUsd)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-muted-foreground">Spent, last {data.metrics.windowDays}d</dt>
-                  <dd className="metric font-medium">{formatUsd(data.metrics.totalCostUsd)}</dd>
-                </div>
-              </dl>
-            </CardContent>
-          </Card>
-
-          {data.limits || data.tools.length > 0 ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>Tools &amp; guardrails</CardTitle>
-                <CardAction>
-                  <Button variant="ghost" size="sm" asChild>
-                    <Link href={href("permissions")}>
-                      Manage
-                      <ArrowRight aria-hidden="true" />
-                    </Link>
-                  </Button>
-                </CardAction>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {data.tools.length > 0 ? (
-                  <ul className="flex flex-wrap gap-1.5">
-                    {data.tools.map((t) => (
-                      <li key={t.name}>
-                        <Badge variant="outline" title={t.reason}>
-                          {t.label}
-                          {t.requiresApproval ? <ShieldCheck className="text-amber-600" aria-label="Needs your approval" /> : null}
-                        </Badge>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {data.limits ? (
-                  <dl className="grid grid-cols-3 gap-2 text-sm">
-                    <div>
-                      <dt className="text-xs text-muted-foreground">Max cost / run</dt>
-                      <dd className="metric font-medium">{formatUsd(data.limits.maxCostPerRunUsd)}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-muted-foreground">Max tool calls</dt>
-                      <dd className="metric font-medium">{formatNumber(data.limits.maxToolCallsPerRun, 0)}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-muted-foreground">Max duration</dt>
-                      <dd className="metric font-medium">{formatDuration(data.limits.maxRunDurationSec * 1000)}</dd>
-                    </div>
-                  </dl>
-                ) : null}
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
+        </Section>
       </div>
+
+      <Section
+        title="Recent runs"
+        description={data.recentRuns.length > 0 ? `The last ${pluralize(data.recentRuns.length, "run")}.` : undefined}
+        actions={
+          <Button variant="link" asChild>
+            <Link href={href("activity")}>
+              All activity <ChevronRight data-icon="inline-end" />
+            </Link>
+          </Button>
+        }
+      >
+        <RunsTable runs={data.recentRuns} workerName={workerName} compact />
+      </Section>
     </>
   );
 }
 
-function ReviewBanner({
+function toolSentence(workerName: string, tools: Array<{ label: string; requiresApproval: boolean }>): string {
+  const open = tools.filter((t) => !t.requiresApproval).map((t) => t.label);
+  const gated = tools.filter((t) => t.requiresApproval).map((t) => t.label);
+  const list = (items: string[]) =>
+    items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+  const parts: string[] = [];
+  if (open.length > 0) parts.push(`${workerName} can use ${list(open)} on their own.`);
+  if (gated.length > 0) parts.push(`${open.length > 0 ? "They ask" : `${workerName} asks`} first before using ${list(gated)}.`);
+  return parts.join(" ");
+}
+
+function costVerdict(estimated: number, actual: number | null): string {
+  if (actual === null) return "No finished runs to compare yet";
+  if (estimated <= 0) return "No estimate on file";
+  const delta = (actual - estimated) / estimated;
+  if (delta > 0.1) return `${formatPercent(delta)} over plan`;
+  if (delta < -0.1) return `${formatPercent(-delta)} under plan`;
+  return "On plan";
+}
+
+function PipelineRow({ step, index }: { step: PipelineStep; index: number }) {
+  return (
+    <Row>
+      <span className="metric text-footnote w-5 shrink-0 pt-0.5 text-tertiary">{index + 1}</span>
+      <div className="min-w-0 flex-1">
+        <RowTitle>{step.name}</RowTitle>
+        <p className="text-callout mt-1 text-pretty text-muted-foreground">{step.description}</p>
+        <RowMeta>
+          {step.tier ? <TierChip tier={step.tier} /> : <span>{operationLabel(step.operation)}</span>}
+          {step.tools.length > 0 ? (
+            <>
+              <Sep />
+              <span>Uses {step.tools.map((t) => t.label).join(", ")}</span>
+            </>
+          ) : null}
+        </RowMeta>
+      </div>
+    </Row>
+  );
+}
+
+/** The one actionable line from a review of the version running today. */
+function ReviewNote({ workerId, workerName, review }: { workerId: string; workerName: string; review: WorkerReviewRow }) {
+  const meta = RECOMMENDATION_META[review.recommendation];
+  return (
+    <div className="flex flex-col gap-2 rounded-[14px] bg-warning-soft px-4 py-3.5 text-[15px] text-pretty sm:flex-row sm:items-center sm:gap-6">
+      <p className="min-w-0 flex-1">
+        <span className="font-medium">Latest review: {meta.headline(workerName)}.</span> {review.recommendationDetail}
+      </p>
+      <Link
+        href={
+          review.recommendation === "REPLACE"
+            ? `/workers/${workerId}?tab=versions`
+            : `/workers/${workerId}?tab=chat`
+        }
+        className="shrink-0 text-[15px] font-medium text-link hover:underline"
+      >
+        {review.recommendation === "REPLACE" ? "Consider a replacement" : `Talk to ${workerName}`} ›
+      </Link>
+    </div>
+  );
+}
+
+/** The verdict was about a design that no longer runs — readable history, no call to action. */
+function StaleReviewNote({
   workerId,
   workerName,
-  recommendation,
-  detail,
-  createdAt,
+  review,
+  active,
 }: {
   workerId: string;
   workerName: string;
-  recommendation: "IMPROVE" | "REPLACE";
-  detail: string;
-  createdAt: string;
+  review: WorkerReviewRow;
+  active: ActiveVersionRef;
 }) {
-  const meta = RECOMMENDATION_META[recommendation];
-  const tone = TONE_CLASSES[meta.tone];
   return (
-    <div className={cn("flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-center", tone.badge)}>
-      <Gauge className="size-5 shrink-0" aria-hidden="true" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">
-          Latest performance review: {meta.headline(workerName)}
-          <span className="ml-2 text-xs font-normal opacity-80">
-            <RelativeTime iso={createdAt} />
-          </span>
-        </p>
-        <p className="mt-0.5 text-sm text-pretty opacity-90">{detail}</p>
-      </div>
-      <div className="flex shrink-0 flex-wrap gap-2">
-        <Button variant="outline" size="sm" className="bg-white" asChild>
-          <Link href={`/workers/${workerId}?tab=performance`}>Read the review</Link>
-        </Button>
-        {recommendation === "REPLACE" ? (
-          <Button size="sm" asChild>
-            <Link href={`/workers/${workerId}?tab=versions#replace`}>Propose a replacement</Link>
-          </Button>
-        ) : (
-          <Button size="sm" asChild>
-            <Link href={`/workers/${workerId}?tab=chat`}>Talk to {workerName}</Link>
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function StaleReviewNote({ workerId, workerName, review, active }: { workerId: string; workerName: string; review: WorkerReviewRow; active: ActiveVersionRef }) {
-  const meta = RECOMMENDATION_META[review.recommendation];
-  return (
-    <div className="flex flex-col gap-3 rounded-xl border border-dashed bg-card/40 p-4 sm:flex-row sm:items-center">
-      <History className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">
-          No performance review of v{active.version} yet
-        </p>
-        <p className="mt-0.5 text-sm text-pretty text-muted-foreground">
-          The last review (&ldquo;{meta.headline(workerName)}&rdquo;, <RelativeTime iso={review.createdAt} />) was of v{review.version},{" "}
-          {beforeChangeLabel(active.changeReason)}. It no longer describes how {workerName} works today — review v{active.version} once it has a
-          few runs behind it.
-        </p>
-      </div>
-      <div className="flex shrink-0 flex-wrap gap-2">
-        <Button variant="ghost" size="sm" asChild>
-          <Link href={`/workers/${workerId}?tab=performance`}>Past reviews</Link>
-        </Button>
-        <GenerateReviewButton workerId={workerId} workerName={workerName} size="sm" label={`Review v${active.version}`} />
-      </div>
-    </div>
-  );
-}
-
-function Pipeline({ steps }: { steps: PipelineStep[] }) {
-  return (
-    <ol className="relative space-y-0">
-      {steps.map((step, index) => {
-        const Icon = step.kind === "agent" ? Bot : (OPERATION_ICONS[step.operation ?? ""] ?? Circle);
-        const isLast = index === steps.length - 1;
-        return (
-          <li key={step.id} className="relative flex gap-3 pb-5 last:pb-0">
-            {!isLast ? <span className="absolute top-8 bottom-0 left-4 w-px bg-border" aria-hidden="true" /> : null}
-            <span
-              className={cn(
-                "relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full ring-1 ring-inset",
-                step.kind === "agent" ? "bg-primary/10 text-primary ring-primary/20" : "bg-muted text-muted-foreground ring-foreground/10",
-              )}
-            >
-              <Icon className="size-4" aria-hidden="true" />
-            </span>
-            <div className="min-w-0 flex-1 pt-1">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <p className="text-sm font-medium">
-                  <span className="mr-1.5 text-xs text-muted-foreground tabular-nums">{index + 1}.</span>
-                  {step.name}
-                </p>
-                {step.tier ? <TierChip tier={step.tier} /> : <Badge variant="secondary">{operationLabel(step.operation)}</Badge>}
-              </div>
-              <p className="mt-0.5 text-sm text-pretty text-muted-foreground">{step.description}</p>
-              {step.tools.length > 0 ? (
-                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Uses</span>
-                  {step.tools.map((tool) => (
-                    <Badge key={tool.name} variant="outline">
-                      {tool.label}
-                    </Badge>
-                  ))}
-                </div>
-              ) : null}
-              <p className="mt-1.5 font-mono text-[11px] text-muted-foreground/80">
-                {step.inputKeys.join(", ") || "—"} → {step.outputKey}
-              </p>
-            </div>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function CostComparison({ estimated, actual, runs }: { estimated: number | null; actual: number | null; runs: number }) {
-  const max = Math.max(estimated ?? 0, actual ?? 0);
-  const width = (value: number | null) => (max > 0 && value !== null ? `${Math.max(2, Math.round((value / max) * 100))}%` : "2%");
-  const delta = estimated !== null && actual !== null && estimated > 0 ? (actual - estimated) / estimated : null;
-
-  return (
-    <div className="space-y-3">
-      <div>
-        <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Estimated</span>
-          <span className="metric text-foreground">{formatUsdPrecise(estimated)}</span>
-        </div>
-        <div className="h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full rounded-full bg-slate-400" style={{ width: width(estimated) }} />
-        </div>
-      </div>
-      <div>
-        <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Actual average{runs > 0 ? ` (${pluralize(runs, "run")})` : ""}</span>
-          <span className="metric text-foreground">{formatUsdPrecise(actual)}</span>
-        </div>
-        <div className="h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full rounded-full bg-primary" style={{ width: width(actual) }} />
-        </div>
-      </div>
-      {delta !== null ? (
-        <p className={cn("text-xs font-medium", delta > 0.1 ? "text-rose-600" : delta < -0.1 ? "text-emerald-600" : "text-muted-foreground")}>
-          {delta > 0.1 ? `${formatPercent(delta)} over estimate` : delta < -0.1 ? `${formatPercent(-delta)} under estimate` : "On budget"}
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">{actual === null ? "No finished runs to compare yet." : "No estimate on file."}</p>
-      )}
-    </div>
+    <p className="text-[15px] text-pretty text-muted-foreground">
+      The last review was written about version {review.version}, {beforeChangeLabel(active.changeReason)}, and no
+      longer describes how {workerName} works today.{" "}
+      <Link href={`/workers/${workerId}?tab=performance`} className="font-medium text-link hover:underline">
+        Review version {active.version} ›
+      </Link>
+    </p>
   );
 }

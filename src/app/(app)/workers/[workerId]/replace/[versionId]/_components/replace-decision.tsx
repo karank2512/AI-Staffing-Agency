@@ -3,12 +3,18 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, UserCheck, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { hireReplacementAction, rejectProposedVersionAction } from "../../../manage-actions";
@@ -23,19 +29,37 @@ export interface ReplaceDecisionProps {
   changeReason: "INITIAL_HIRE" | "REPLACEMENT" | "SPEC_CHANGE" | "MANUAL";
   status: "PROPOSED" | "ACTIVE" | "REPLACED" | "REJECTED";
   canDecide: boolean;
+  /** `workers.hire` — hiring the replacement. */
+  mayHire: boolean;
+  /** `workers.manage` — declining the proposal. */
+  mayManage: boolean;
   workerStatus: "ACTIVE" | "PAUSED" | "RETIRED";
 }
 
-/** The decision: hire the replacement / apply the change, or decline. Everything else on the page is evidence. */
-export function ReplaceDecision({ workerId, workerName, versionId, version, changeReason, status, canDecide, workerStatus }: ReplaceDecisionProps) {
+/**
+ * The decision, in a sticky bottom bar: one primary pill to hire, one gray pill to keep things as they are.
+ * Everything else on the page is evidence for it.
+ */
+export function ReplaceDecision({
+  workerId,
+  workerName,
+  versionId,
+  version,
+  changeReason,
+  status,
+  canDecide,
+  mayHire,
+  mayManage,
+  workerStatus,
+}: ReplaceDecisionProps) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [startFirstRun, setStartFirstRun] = useState(true);
   const [pending, setPending] = useState(false);
 
   const isReplacement = changeReason === "REPLACEMENT";
   const ctaLabel = isReplacement ? "Hire replacement" : "Apply change";
-  const Icon = isReplacement ? UserCheck : Wand2;
 
   async function hire() {
     if (pending) return;
@@ -48,8 +72,12 @@ export function ReplaceDecision({ workerId, workerName, versionId, version, chan
       return;
     }
     const finalName = name || workerName;
-    toast.success(isReplacement ? `${finalName} is hired — version ${version} is now active` : `${finalName} now works the new way`, {
-      description: r.data.firstRunQueued ? "The first run is starting." : workerStatus === "PAUSED" ? "Resume the worker to start the first run." : undefined,
+    toast.success(isReplacement ? `${finalName} is hired — version ${version} is now live` : `${finalName} now works the new way`, {
+      description: r.data.firstRunQueued
+        ? "The first run is starting."
+        : workerStatus === "PAUSED"
+          ? "Resume the worker to start the first run."
+          : undefined,
     });
     router.push(r.data.redirectTo);
   }
@@ -63,92 +91,132 @@ export function ReplaceDecision({ workerId, workerName, versionId, version, chan
 
   if (!canDecide) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>{status === "ACTIVE" ? "Decision made" : status === "REPLACED" ? "Superseded" : "Declined"}</CardTitle>
-          <CardDescription>
-            {status === "ACTIVE"
-              ? `Version ${version} is the one ${workerName} works under today.`
-              : status === "REPLACED"
-                ? `Version ${version} was active for a while and has since been replaced.`
-                : `This proposal was declined; ${workerName} kept working as before.`}
-          </CardDescription>
-        </CardHeader>
-        <CardFooter className="flex flex-wrap gap-2">
-          <Button variant="outline" asChild>
-            <Link href={`/workers/${workerId}?tab=versions`}>All versions</Link>
-          </Button>
-          <Button variant="outline" asChild>
-            <Link href={`/workers/${workerId}`}>Back to {workerName}</Link>
-          </Button>
-        </CardFooter>
-      </Card>
+      <div className="ml-[calc(50%-50vw)] w-dvw">
+        <div className="material-thick shadow-bar">
+          <div className="mx-auto flex w-full max-w-(--container-app) flex-wrap items-center justify-between gap-4 px-4 py-3.5 sm:px-6">
+            <p className="text-footnote min-w-0 text-muted-foreground">
+              {status === "ACTIVE"
+                ? `Version ${version} is what ${workerName} works under today.`
+                : status === "REPLACED"
+                  ? `Version ${version} was live for a while and has since been replaced.`
+                  : `This proposal was declined; ${workerName} kept working as before.`}
+            </p>
+            <div className="flex shrink-0 items-center gap-2.5">
+              <Button variant="secondary" asChild>
+                <Link href={`/workers/${workerId}?tab=versions`}>All versions</Link>
+              </Button>
+              <Button variant="secondary" asChild>
+                <Link href={`/workers/${workerId}`}>Back to {workerName}</Link>
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
     );
   }
 
   return (
-    <Card className="border-primary/25 ring-primary/15">
-      <CardHeader>
-        <CardTitle>{isReplacement ? "Your decision" : "Apply this change?"}</CardTitle>
-        <CardDescription>
-          {isReplacement
-            ? `The current ${workerName} keeps working until you hire the replacement. History, deliverables and permissions carry over.`
-            : `${workerName} keeps the same name and history — only the design changes. Permissions you tightened stay tightened.`}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {isReplacement ? (
-          <div className="space-y-1.5">
-            <Label htmlFor="replacement-name">New name (optional)</Label>
-            <Input
-              id="replacement-name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              maxLength={WORKER_NAME_MAX_CHARS}
-              placeholder={`Keep “${workerName}”`}
-              disabled={pending}
-              autoComplete="off"
-            />
-            <p className="text-xs text-muted-foreground">A new name makes the change visible to the team; leave it blank to keep continuity.</p>
-          </div>
-        ) : null}
-        <div className="flex items-start gap-2.5">
-          <Checkbox id="start-first-run" checked={startFirstRun} onCheckedChange={(v) => setStartFirstRun(v === true)} disabled={pending} className="mt-0.5" />
-          <div className="space-y-0.5">
-            <Label htmlFor="start-first-run" className="font-normal">
-              Start the first run right away
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {workerStatus === "PAUSED" ? `${workerName} is paused, so the run waits until you resume.` : "Otherwise the next scheduled run picks up the new version."}
-            </p>
+    <div className="sticky bottom-0 z-30 ml-[calc(50%-50vw)] w-dvw">
+      <div className="material-thick shadow-bar">
+        <div className="mx-auto flex w-full max-w-(--container-app) flex-wrap items-center justify-between gap-3 px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-6">
+          <p className="text-footnote hidden min-w-0 text-muted-foreground sm:block">
+            {mayHire
+              ? isReplacement
+                ? `Nothing changes until you hire. ${workerName} keeps working in the meantime.`
+                : `${workerName} keeps the same name and history — only the design changes.`
+              : "Only workspace admins can decide on a proposal."}
+          </p>
+          <div className="flex w-full items-center gap-3 sm:w-auto">
+            {mayManage ? (
+              <ConfirmDialog
+                trigger={
+                  <Button variant="secondary" disabled={pending} className="max-sm:h-11 max-sm:flex-1">
+                    {isReplacement ? "Keep current" : "Decline"}
+                  </Button>
+                }
+                title={isReplacement ? `Keep the current ${workerName}?` : "Decline this change?"}
+                description={
+                  isReplacement
+                    ? `The proposed replacement is declined and ${workerName} carries on as is. You can ask for another one any time.`
+                    : `${workerName} keeps working the current way. You can ask for the change again in chat.`
+                }
+                confirmLabel={isReplacement ? "Keep current version" : "Decline change"}
+                destructive
+                onConfirm={decline}
+              />
+            ) : null}
+            <Button
+              disabled={pending || !mayHire}
+              onClick={() => setOpen(true)}
+              className="max-sm:h-11 max-sm:flex-1 max-sm:text-[15px]"
+            >
+              {ctaLabel}
+            </Button>
           </div>
         </div>
-      </CardContent>
-      <CardFooter className="flex flex-wrap items-center gap-2">
-        <Button onClick={hire} disabled={pending} className="min-w-40">
-          {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Icon aria-hidden="true" />}
-          {pending ? (isReplacement ? "Hiring…" : "Applying…") : ctaLabel}
-        </Button>
-        <ConfirmDialog
-          trigger={
-            <Button variant="ghost" disabled={pending}>
-              Decline
+      </div>
+
+      <Dialog open={open} onOpenChange={(next) => (pending ? undefined : setOpen(next))}>
+        <DialogContent showCloseButton={false} className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{isReplacement ? `Hire version ${version}?` : `Apply version ${version}?`}</DialogTitle>
+            <DialogDescription>
+              {isReplacement
+                ? `Version ${version} takes over from now on. ${workerName}'s history, deliverables and permissions carry over, and the old version stays on file.`
+                : `${workerName} starts working the new way from the next run. Permissions you tightened stay tightened.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5">
+            {isReplacement ? (
+              <div className="space-y-1.5">
+                <Label htmlFor="replacement-name">A new name (optional)</Label>
+                <Input
+                  id="replacement-name"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  maxLength={WORKER_NAME_MAX_CHARS}
+                  placeholder={`Keep “${workerName}”`}
+                  disabled={pending}
+                  autoComplete="off"
+                />
+                <p className="text-footnote text-muted-foreground">
+                  A new name makes the change visible to the team; leave it blank to keep continuity.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="flex items-start gap-3">
+              <Checkbox
+                id="start-first-run"
+                checked={startFirstRun}
+                onCheckedChange={(v) => setStartFirstRun(v === true)}
+                disabled={pending}
+                className="mt-0.5"
+              />
+              <div>
+                <Label htmlFor="start-first-run" className="font-normal">
+                  Start the first run right away
+                </Label>
+                <p className="text-footnote mt-0.5 text-muted-foreground">
+                  {workerStatus === "PAUSED"
+                    ? `${workerName} is paused, so the run waits until you resume.`
+                    : "Otherwise the next scheduled run picks up the new version."}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="secondary" disabled={pending} onClick={() => setOpen(false)}>
+              Cancel
             </Button>
-          }
-          title={isReplacement ? `Keep the current ${workerName}?` : "Decline this change?"}
-          description={
-            isReplacement
-              ? `The proposed replacement is declined and ${workerName} continues as is. You can propose another replacement any time.`
-              : `${workerName} keeps working the current way. You can ask for the change again in chat.`
-          }
-          confirmLabel={isReplacement ? "Keep current version" : "Decline change"}
-          destructive
-          onConfirm={decline}
-        />
-        <span className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-          <Check className="size-3" aria-hidden="true" /> Reversible — every version stays in history
-        </span>
-      </CardFooter>
-    </Card>
+            <Button type="button" disabled={pending} onClick={hire}>
+              {pending ? (isReplacement ? "Hiring…" : "Applying…") : ctaLabel}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }

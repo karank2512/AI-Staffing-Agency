@@ -3,29 +3,24 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { proposeReplacementAction } from "../manage-actions";
 
 export interface VersionsProposeCardProps {
   workerId: string;
   workerName: string;
+  /** The worker can take a new proposal and the viewer is allowed to ask for one. */
   canPropose: boolean;
+  mayManage: boolean;
   status: "ACTIVE" | "PAUSED" | "RETIRED";
   openProposal: { id: string; version: number; changeReason: "INITIAL_HIRE" | "REPLACEMENT" | "SPEC_CHANGE" | "MANUAL"; href: string } | null;
 }
 
-const STEPS = [
-  { title: "Review the record", detail: "Failed runs, low scores and rejected deliverables from the last 30 days." },
-  { title: "Design a better fit", detail: "Sharper instructions, a stronger model where it matters, and cleaning steps." },
-  { title: "You decide", detail: "Compare side by side, then hire the replacement or keep the current one." },
-];
-
 /** The "Replace" entry point — anchored so links from other tabs land on it. */
-export function VersionsProposeCard({ workerId, workerName, canPropose, status, openProposal }: VersionsProposeCardProps) {
+export function VersionsProposeCard({ workerId, workerName, canPropose, mayManage, status, openProposal }: VersionsProposeCardProps) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
 
@@ -47,75 +42,51 @@ export function VersionsProposeCard({ workerId, workerName, canPropose, status, 
   }
 
   return (
-    <Card id="replace" className="scroll-mt-24 border-primary/15 bg-gradient-to-br from-primary/[0.04] to-transparent">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <RefreshCw className="size-4 text-primary" aria-hidden="true" />
-          Propose a replacement
-        </CardTitle>
-        <CardDescription>
-          Not happy with {workerName}&apos;s work? Like any contractor, they can be replaced — by a version designed around what went
-          wrong.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        <ol className="grid gap-3 sm:grid-cols-3">
-          {STEPS.map((step, i) => (
-            <li key={step.title} className="rounded-lg border bg-card/80 p-3">
-              <p className="text-xs font-medium text-muted-foreground">Step {i + 1}</p>
-              <p className="mt-0.5 text-sm font-medium">{step.title}</p>
-              <p className="mt-1 text-xs text-pretty text-muted-foreground">{step.detail}</p>
-            </li>
-          ))}
-        </ol>
+    <Card id="replace" className="scroll-mt-32">
+      <CardContent className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between sm:gap-10">
+        <div className="min-w-0">
+          <h2 className="text-title-2 text-balance">
+            {openProposal ? `Version ${openProposal.version} is waiting for your decision` : `Not happy with ${workerName}'s work?`}
+          </h2>
+          <p className="text-body mt-2 max-w-[62ch] text-pretty text-muted-foreground">
+            {openProposal
+              ? `Nothing changes until you hire it or decline. ${workerName} keeps working the current way in the meantime.`
+              : status === "RETIRED"
+                ? `${workerName} is retired. Hire a new worker for this job instead.`
+                : `Like any contractor, ${workerName} can be replaced. We read the last 30 days — failed runs, low scores, work you sent back — and design a version around what went wrong. You compare the two side by side before anything changes.`}
+          </p>
+        </div>
 
-        {pending ? (
-          <div className="flex items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 text-sm" role="status" aria-live="polite">
-            <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />
-            <div>
-              <p className="font-medium">Analyzing 30 days of runs…</p>
-              <p className="text-xs text-muted-foreground">Reading evaluations and feedback, then drafting a stronger design. This takes a moment.</p>
-            </div>
-          </div>
-        ) : openProposal ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5">
-            <p className="text-sm text-amber-900">
-              <span className="font-medium">Version {openProposal.version} is waiting for your decision.</span>{" "}
-              <span className="text-amber-800/80">Nothing changes until you hire it or decline.</span>
+        <div className="flex shrink-0 flex-wrap items-center gap-3">
+          {pending ? (
+            <p className="text-footnote text-muted-foreground" role="status" aria-live="polite">
+              Reading 30 days of runs and drafting a stronger design…
             </p>
-            <div className="flex items-center gap-2">
+          ) : openProposal ? (
+            <>
               {canPropose ? (
                 <ConfirmDialog
-                  trigger={
-                    <Button variant="ghost" size="sm">
-                      Start over
-                    </Button>
-                  }
-                  title="Run a fresh analysis?"
-                  description={`The open proposal for version ${openProposal.version} will be declined and replaced by a new one based on ${workerName}'s latest runs.`}
-                  confirmLabel="Analyze again"
+                  trigger={<Button variant="ghost">Start over</Button>}
+                  title="Draft a fresh proposal?"
+                  description={`The open proposal for version ${openProposal.version} is declined and replaced by a new one based on ${workerName}'s latest runs.`}
+                  confirmLabel="Draft a new one"
                   onConfirm={propose}
                 />
               ) : null}
-              <Button size="sm" asChild>
-                <Link href={openProposal.href}>
-                  Review &amp; decide <ArrowUpRight aria-hidden="true" />
-                </Link>
+              <Button variant="secondary" asChild>
+                <Link href={openProposal.href}>Compare and decide</Link>
               </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              {status === "RETIRED"
-                ? `${workerName} is retired. Hire a new worker for this job instead.`
-                : `The current version keeps working until you hire the replacement.`}
-            </p>
-            <Button onClick={proposeFromButton} disabled={!canPropose}>
-              <Sparkles aria-hidden="true" /> Propose a replacement
+            </>
+          ) : mayManage ? (
+            <Button variant="secondary" onClick={proposeFromButton} disabled={!canPropose}>
+              Draft a replacement
             </Button>
-          </div>
-        )}
+          ) : (
+            <p className="text-footnote max-w-[24ch] text-muted-foreground">
+              Only workspace admins can propose a replacement.
+            </p>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
