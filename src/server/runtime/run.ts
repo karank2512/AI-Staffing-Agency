@@ -5,7 +5,7 @@ import { db } from "@/server/db";
 import { refreshWorkerScore } from "@/server/evaluation";
 import { conflict, notFound } from "@/server/errors";
 import { loadRunBundle } from "./context";
-import { LockLost, RunFailure } from "./failure";
+import { LockLost, publicRunError, RunFailure } from "./failure";
 import { RunLock } from "./lock";
 import { log } from "./log";
 import { claimRun, CLAIM_SELECT } from "./queue";
@@ -50,7 +50,9 @@ async function failUnstartable(runId: string, executorId: string, failure: RunFa
     select: { organizationId: true, workerId: true, jobId: true, worker: { select: { name: true } } },
   });
   if (!run) throw notFound("Run");
-  await transitionRun(runId, "FAILED", { error: failure.message, finishedAt: new Date(), durationMs: 0 }, { expectLockedBy: executorId });
+  // Redacted + clipped: this text is read by every member of the org (audit F-009).
+  const message = publicRunError(failure.message);
+  await transitionRun(runId, "FAILED", { error: message, finishedAt: new Date(), durationMs: 0 }, { expectLockedBy: executorId });
   log.warn(`run ${runId} could not start: ${failure.message}`);
   try {
     await refreshWorkerScore(run.workerId);
@@ -61,13 +63,13 @@ async function failUnstartable(runId: string, executorId: string, failure: RunFa
     organizationId: run.organizationId,
     type: "RUN_FAILED",
     title: `${run.worker.name} could not start a run`,
-    detail: failure.message,
+    detail: message,
     workerId: run.workerId,
     jobId: run.jobId,
     runId,
     actorType: "SYSTEM",
   });
-  return { status: "FAILED", error: failure.message, willRetry: false };
+  return { status: "FAILED", error: message, willRetry: false };
 }
 
 export async function executeRun(runId: string, opts: { executorId?: string } = {}): Promise<ExecuteOutcome> {

@@ -1,10 +1,12 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import { HEALTH_THRESHOLDS, ReviewNarrativeSchema, type ReviewNarrative } from "@/server/domain/evaluation";
 import { parseJobSpec } from "@/server/domain/job-spec";
 import { conflict, notFound } from "@/server/errors";
 import { llm } from "@/server/models";
+import { assertOrgActive, assertWithinBudget } from "@/server/security";
 import { DEFAULT_METRICS_WINDOW_DAYS, getWorkerMetrics } from "./metrics";
 import { IMPROVE_CEILING, formatKpiValue, mockReviewNarrative, type ReviewEvidence } from "./review-mock";
 import { refreshWorkerScore } from "./score";
@@ -88,6 +90,9 @@ export function normalizeReviewNarrative(raw: unknown): unknown {
 }
 
 export async function generatePerformanceReview(s: SessionContext, workerId: string): Promise<{ reviewId: string }> {
+  assertCan(s, "reviews.generate");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const worker = await db.worker.findFirst({
     where: { id: workerId, organizationId: s.organizationId },
     select: {

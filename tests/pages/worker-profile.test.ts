@@ -143,6 +143,9 @@ describe("queries/worker-profile", () => {
   beforeAll(async () => {
     t = await createTestOrg("worker-profile");
     other = await createTestOrg("worker-profile-other");
+    // This suite seats far more workers than a default workspace may hire (Organization.maxActiveWorkers = 10),
+    // and hireWorker / hireReplacement now enforce that ceiling.
+    await db.organization.update({ where: { id: t.organization.id }, data: { maxActiveWorkers: 100 } });
   });
   afterAll(async () => {
     await t.cleanup();

@@ -16,7 +16,12 @@ import { sentenceCase } from "@/lib/format";
  * fail when a schema enum gains a value that has no label here.
  */
 
-/** success = emerald · attention = amber · failure = rose · running = sky · idle = slate */
+/**
+ * The five tones, and the tokens they map to (docs/DESIGN.md):
+ * success → --success green · attention → --warning orange ("waiting on you") · failure → --danger red ·
+ * running → --info blue · idle → neutral gray. Status colour only ever appears in a 7px dot or short text;
+ * the soft fills are reserved for the one state that needs a person.
+ */
 export type StatusTone = "success" | "attention" | "failure" | "running" | "idle";
 
 export type StatusKind = "run" | "worker" | "health" | "deliverable" | "version" | "approval" | "job" | "spec";
@@ -108,34 +113,34 @@ export function statusLabel(kind: StatusKind, status: string): string {
 /** Full static class strings per tone (Tailwind cannot see dynamically built class names). */
 export const TONE_CLASSES: Readonly<Record<StatusTone, { badge: string; dot: string; text: string; soft: string }>> = {
   success: {
-    badge: "border-emerald-200 bg-emerald-50 text-emerald-700",
-    dot: "bg-emerald-500",
-    text: "text-emerald-600",
-    soft: "bg-emerald-50 text-emerald-700",
+    badge: "border-transparent bg-success-soft text-success",
+    dot: "bg-success",
+    text: "text-success",
+    soft: "bg-success-soft text-success",
   },
   attention: {
-    badge: "border-amber-200 bg-amber-50 text-amber-800",
-    dot: "bg-amber-500",
-    text: "text-amber-600",
-    soft: "bg-amber-50 text-amber-800",
+    badge: "border-transparent bg-warning-soft text-warning",
+    dot: "bg-warning",
+    text: "text-warning",
+    soft: "bg-warning-soft text-warning",
   },
   failure: {
-    badge: "border-rose-200 bg-rose-50 text-rose-700",
-    dot: "bg-rose-500",
-    text: "text-rose-600",
-    soft: "bg-rose-50 text-rose-700",
+    badge: "border-transparent bg-danger-soft text-danger",
+    dot: "bg-danger",
+    text: "text-danger",
+    soft: "bg-danger-soft text-danger",
   },
   running: {
-    badge: "border-sky-200 bg-sky-50 text-sky-700",
-    dot: "bg-sky-500",
-    text: "text-sky-600",
-    soft: "bg-sky-50 text-sky-700",
+    badge: "border-transparent bg-info-soft text-info",
+    dot: "bg-info",
+    text: "text-info",
+    soft: "bg-info-soft text-info",
   },
   idle: {
-    badge: "border-slate-200 bg-slate-50 text-slate-600",
-    dot: "bg-slate-400",
-    text: "text-slate-500",
-    soft: "bg-slate-100 text-slate-600",
+    badge: "border-transparent bg-muted text-muted-foreground",
+    dot: "bg-muted-foreground",
+    text: "text-muted-foreground",
+    soft: "bg-muted text-muted-foreground",
   },
 };
 
@@ -144,8 +149,8 @@ export const TONE_CLASSES: Readonly<Record<StatusTone, { badge: string; dot: str
 export type ScoreBand = "good" | "fair" | "poor" | "none";
 
 /**
- * Score bands used by ScoreRing and anywhere a 0..100 score is coloured: ≥ 80 good (emerald), 65–79 fair (amber),
- * < 65 poor (rose). Banding uses the ROUNDED score so the colour always agrees with the number on screen.
+ * Score bands used by ScoreRing and anywhere a 0..100 score is coloured: >= 80 "Strong", 65–79 "Watch",
+ * < 65 "At risk". Banding uses the ROUNDED score so the colour always agrees with the number on screen.
  */
 export function scoreBand(score: number | null | undefined): ScoreBand {
   if (score === null || score === undefined || !Number.isFinite(score)) return "none";
@@ -156,8 +161,8 @@ export function scoreBand(score: number | null | undefined): ScoreBand {
 }
 
 export const SCORE_BAND_CLASSES: Readonly<Record<ScoreBand, { stroke: string; text: string; label: string }>> = {
-  good: { stroke: "stroke-emerald-500", text: "text-emerald-600", label: "Strong" },
-  fair: { stroke: "stroke-amber-500", text: "text-amber-600", label: "Mixed" },
-  poor: { stroke: "stroke-rose-500", text: "text-rose-600", label: "Poor" },
-  none: { stroke: "stroke-slate-300", text: "text-muted-foreground", label: "Not rated yet" },
+  good: { stroke: "stroke-success", text: "text-success", label: "Strong" },
+  fair: { stroke: "stroke-warning", text: "text-warning", label: "Watch" },
+  poor: { stroke: "stroke-danger", text: "text-danger", label: "At risk" },
+  none: { stroke: "stroke-input", text: "text-muted-foreground", label: "Not rated yet" },
 };

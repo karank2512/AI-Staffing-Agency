@@ -65,6 +65,8 @@ describe("demo seed", () => {
   it("creates the demo org and a user who can sign in with the published credentials", async () => {
     const org = await db.organization.findUniqueOrThrow({ where: { slug: DEMO_USER.organizationSlug } });
     expect(org.id).toBe("org_demo");
+    // Marked as sample data so the UI can badge it and an operator can tell it apart from a real tenant.
+    expect(org.isDemo).toBe(true);
     const user = await db.user.findUniqueOrThrow({ where: { email: DEMO_USER.email.toLowerCase() } });
     expect(user).toMatchObject({ id: "user_demo", organizationId: "org_demo", name: DEMO_USER.name, role: "OWNER" });
     expect(await verifyPassword(DEMO_USER.password, user.passwordHash)).toBe(true);

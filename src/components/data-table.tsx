@@ -19,10 +19,10 @@ export interface DataTableProps {
 }
 
 /**
- * Read-only table for worker-produced records. Headers are humanized from snake_case with acronyms kept upper-case
- * (`source_url` → "Source URL", `hq` → "HQ"); numbers are grouped and right-aligned, URLs become short external
- * links, empty values show a muted em-dash. The header sticks while the body scrolls (max height ~32rem) and wide
- * tables scroll sideways.
+ * Read-only table for worker-produced records. Headers are humanized from snake_case with acronyms kept
+ * upper-case (`source_url` → "Source URL", `hq` → "HQ"); numbers are grouped and right-aligned, URLs become
+ * short external links, empty values show a muted em-dash. Hairline rows on white, no outer border — the
+ * surface it sits on is the frame. The header sticks while the body scrolls.
  */
 export function DataTable({ rows, columns, maxRows = 50, showIndex = true, className }: DataTableProps) {
   const model = buildDataTableModel({ rows, columns, maxRows, showIndex });
@@ -31,10 +31,7 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
     return (
       <div
         data-slot="data-table"
-        className={cn(
-          "rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground",
-          className,
-        )}
+        className={cn("rounded-lg bg-muted px-4 py-10 text-center text-[15px] text-muted-foreground", className)}
       >
         No records to show.
       </div>
@@ -44,9 +41,9 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
   const { headers, visibleRows, totalRows, fieldCount } = model;
 
   return (
-    <div data-slot="data-table" className={cn("overflow-hidden rounded-lg border border-border bg-card", className)}>
+    <div data-slot="data-table" className={cn("overflow-hidden rounded-xl bg-card", className)}>
       <div className="max-h-[32rem] overflow-auto">
-        <table className="w-full border-separate border-spacing-0 text-left text-[13px] leading-5">
+        <table className="w-full border-separate border-spacing-0 text-left text-callout">
           <thead>
             <tr>
               {headers.map((header) =>
@@ -54,7 +51,7 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
                   <th
                     key="index"
                     scope="col"
-                    className="sticky top-0 z-10 w-10 border-b border-border bg-muted px-3 py-2 text-right text-xs font-medium text-muted-foreground/70"
+                    className="sticky top-0 z-10 h-11 w-12 border-b border-border bg-card px-4 text-right text-[13px] font-semibold text-muted-foreground"
                   >
                     {header.label}
                   </th>
@@ -64,7 +61,7 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
                     scope="col"
                     title={header.key}
                     className={cn(
-                      "sticky top-0 z-10 border-b border-border bg-muted px-3 py-2 text-xs font-medium whitespace-nowrap text-muted-foreground",
+                      "sticky top-0 z-10 h-11 border-b border-border bg-card px-4 text-[13px] font-semibold whitespace-nowrap text-muted-foreground",
                       header.numeric && "text-right",
                     )}
                   >
@@ -76,22 +73,22 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
           </thead>
           <tbody>
             {visibleRows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="group transition-colors hover:bg-muted/40">
+              <tr
+                key={rowIndex}
+                className="group relative transition-colors duration-200 ease-standard after:pointer-events-none after:absolute after:inset-x-4 after:bottom-0 after:h-px after:bg-border hover:bg-[#f9f9fb] last:after:hidden"
+              >
                 {headers.map((header) =>
                   header.kind === "index" ? (
                     <td
                       key="index"
-                      className="border-b border-border/60 px-3 py-2 text-right align-top text-xs text-muted-foreground/70 tabular-nums group-last:border-b-0"
+                      className="px-4 py-3 text-right align-top text-[13px] text-tertiary tabular-nums"
                     >
                       {rowIndex + 1}
                     </td>
                   ) : (
                     <td
                       key={`field:${header.key}`}
-                      className={cn(
-                        "border-b border-border/60 px-3 py-2 align-top group-last:border-b-0",
-                        header.numeric && "text-right",
-                      )}
+                      className={cn("px-4 py-3 align-top", header.numeric && "text-right")}
                     >
                       <Cell value={row[header.key]} column={header.key} />
                     </td>
@@ -102,7 +99,7 @@ export function DataTable({ rows, columns, maxRows = 50, showIndex = true, class
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground tabular-nums">
+      <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-2.5 text-footnote text-muted-foreground tabular-nums">
         <span>
           Showing {formatNumber(visibleRows.length, 0)} of {formatNumber(totalRows, 0)}{" "}
           {totalRows === 1 ? "record" : "records"}
@@ -119,7 +116,7 @@ function Cell({ value, column }: { value: unknown; column: string }) {
   const cell = formatCell(value, column);
   switch (cell.kind) {
     case "empty":
-      return <span className="text-muted-foreground/60">—</span>;
+      return <span className="text-tertiary">—</span>;
     case "number":
       return <span className="whitespace-nowrap tabular-nums">{cell.text}</span>;
     case "boolean":
@@ -131,7 +128,7 @@ function Cell({ value, column }: { value: unknown; column: string }) {
           target="_blank"
           rel="noopener noreferrer nofollow"
           title={cell.href}
-          className="inline-flex max-w-72 items-center gap-1 font-medium text-primary underline decoration-primary/30 underline-offset-[3px] hover:decoration-primary"
+          className="inline-flex max-w-72 items-center gap-1 text-link underline-offset-[3px] hover:underline"
         >
           <span className="truncate">{cell.text}</span>
           <ExternalLink className="size-3 shrink-0 opacity-60" aria-hidden="true" />
@@ -139,7 +136,10 @@ function Cell({ value, column }: { value: unknown; column: string }) {
       );
     case "text":
       return (
-        <span className="line-clamp-3 max-w-md min-w-24 break-words" title={cell.text.length > 120 ? cell.text : undefined}>
+        <span
+          className="line-clamp-3 max-w-md min-w-24 break-words"
+          title={cell.text.length > 120 ? cell.text : undefined}
+        >
           {cell.text}
         </span>
       );

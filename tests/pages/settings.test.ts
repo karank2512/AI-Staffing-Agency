@@ -54,7 +54,7 @@ describe("settings: getSettingsPage", () => {
   });
 
   it("reports Simulated mode with every tier routed to the mock provider and env var names for each live provider", async () => {
-    const page = await getSettingsPage(t.organization.id);
+    const page = await getSettingsPage(t.organization.id, { role: "OWNER" });
     expect(page.providers.mode).toBe("simulated");
     expect(page.providers.forceSimulated).toBe(true); // tests/setup/env.ts
     expect(page.providers.providers.map((p) => p.id)).toEqual(["anthropic", "openai", "google", "mock"]);
@@ -66,8 +66,41 @@ describe("settings: getSettingsPage", () => {
       expect(route.model).toBe(`mock-${route.tier}`);
       expect(route.overrideEnvVar).toBe(`MODEL_TIER_${route.tier.toUpperCase()}`);
     }
-    expect(page.executor).toMatchObject({ enabled: false, pollMs: 1000, concurrency: 2 });
-    expect(page.billing.marginMultiplier).toBeGreaterThan(0);
+    expect(page.operator?.executor).toMatchObject({ enabled: false, pollMs: 1000, concurrency: 2 });
+    expect(page.operator?.billing.marginMultiplier).toBeGreaterThan(0);
+  });
+
+  it("hides platform-operator config from admins and members, and defaults to hiding it (INF-19)", async () => {
+    const owner = await getSettingsPage(t.organization.id, { role: "OWNER" });
+    expect(owner.operator).not.toBeNull();
+    expect(owner.permissions).toMatchObject({ "credentials.manage": true, "org.manage": true });
+
+    for (const role of ["ADMIN", "MEMBER"] as const) {
+      const page = await getSettingsPage(t.organization.id, { role });
+      expect(page.operator).toBeNull();
+      // Nor the env var names behind the providers and tier routes.
+      expect(page.providers.providers.every((p) => p.envVar === null)).toBe(true);
+      expect(page.providers.tiers.every((r) => r.overrideEnvVar === null)).toBe(true);
+      // The rest of the page is unchanged: the vault and the workspace card still render.
+      expect(page.credentials.length).toBeGreaterThan(0);
+      expect(page.workspace.organizationName).toBe(t.organization.name);
+    }
+
+    const member = await getSettingsPage(t.organization.id, { role: "MEMBER" });
+    expect(member.permissions).toEqual({
+      "credentials.manage": false,
+      "members.invite": false,
+      "members.manage": false,
+      "org.manage": false,
+    });
+    expect((await getSettingsPage(t.organization.id, { role: "ADMIN" })).permissions).toMatchObject({
+      "credentials.manage": true,
+      "members.invite": true,
+      "members.manage": false,
+      "org.manage": false,
+    });
+    // No role at all → the least privileged view.
+    expect((await getSettingsPage(t.organization.id)).operator).toBeNull();
   });
 
   it("lists every known credential as unset by default, with the tools it powers", async () => {

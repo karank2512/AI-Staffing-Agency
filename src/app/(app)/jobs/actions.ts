@@ -5,10 +5,12 @@ import { Prisma } from "@prisma/client";
 import { runAction, type ActionResult } from "@/lib/action-result";
 import { recordActivity } from "@/server/activity";
 import { requireSession } from "@/server/auth";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db } from "@/server/db";
 import { conflict, notFound } from "@/server/errors";
 import { discardJob } from "@/server/staffing";
+import { parseId } from "../_lib/action-guards";
 
 /**
  * Server actions for /jobs and /jobs/[jobId]. Every action: requireSession → mutation → revalidate. Results are
@@ -28,6 +30,8 @@ function revalidateJob(jobId: string) {
  * ACTIVE/PAUSED workers must be retired first (retireWorker re-opens the job as SPEC_APPROVED, which closes fine).
  */
 async function closeJob(s: SessionContext, jobId: string): Promise<{ title: string }> {
+  // Closing a job is workforce planning, not day-to-day work (role matrix: jobs.manage).
+  assertCan(s, "jobs.manage");
   const job = await db.job.findFirst({
     where: { id: jobId, organizationId: s.organizationId },
     select: { id: true, title: true, status: true, _count: { select: { workers: { where: { status: { in: ["ACTIVE", "PAUSED"] } } } } } },
@@ -59,8 +63,9 @@ async function closeJob(s: SessionContext, jobId: string): Promise<{ title: stri
 export async function closeJobAction(jobId: string): Promise<ActionResult<{ title: string }>> {
   return runAction(async () => {
     const s = await requireSession();
-    const closed = await closeJob(s, jobId);
-    revalidateJob(jobId);
+    const id = parseId(jobId, "Job");
+    const closed = await closeJob(s, id);
+    revalidateJob(id);
     return closed;
   });
 }
@@ -69,8 +74,9 @@ export async function closeJobAction(jobId: string): Promise<ActionResult<{ titl
 export async function discardJobAction(jobId: string): Promise<ActionResult<{ redirectTo: string }>> {
   return runAction(async () => {
     const s = await requireSession();
-    await discardJob(s, jobId);
-    revalidateJob(jobId);
+    const id = parseId(jobId, "Job");
+    await discardJob(s, id);
+    revalidateJob(id);
     return { redirectTo: "/jobs" };
   });
 }

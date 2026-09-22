@@ -1,6 +1,7 @@
-import type { ApprovalStatus, Prisma, RunStatus } from "@prisma/client";
+import type { ApprovalStatus, Prisma, RunStatus, UserRole } from "@prisma/client";
 import { db } from "@/server/db";
 import { tools } from "@/server/tools";
+import { APPROVAL_PERMISSION_KEYS, permissionSubset, type ApprovalPermissions } from "./permissions";
 
 /**
  * Read side of /approvals (and the "Needs your attention" strip on /workforce). Plain view models only —
@@ -118,9 +119,17 @@ export interface ApprovalsPage {
   pending: ApprovalView[];
   /** APPROVED / REJECTED / EXPIRED, newest decision first. */
   decided: ApprovalView[];
+  /**
+   * Deciding needs approvals.decide; a request whose tool writes outside the workspace (`externalWrite` on the
+   * view) additionally needs approvals.decideExternal, which `decideApproval` re-checks from the DB.
+   */
+  permissions: ApprovalPermissions;
 }
 
-export async function getApprovalsPage(organizationId: string, opts: { workerId?: string } = {}): Promise<ApprovalsPage> {
+export async function getApprovalsPage(
+  organizationId: string,
+  opts: { workerId?: string; role?: UserRole } = {},
+): Promise<ApprovalsPage> {
   const [pending, decided] = await Promise.all([
     listApprovals(organizationId, { status: "PENDING", workerId: opts.workerId }),
     db.approval.findMany({
@@ -134,6 +143,7 @@ export async function getApprovalsPage(organizationId: string, opts: { workerId?
   return {
     pending: [...pending].sort((a, b) => a.requestedAt.localeCompare(b.requestedAt)),
     decided: decided.map((row) => toView(row, names)),
+    permissions: permissionSubset(opts.role, APPROVAL_PERMISSION_KEYS),
   };
 }
 

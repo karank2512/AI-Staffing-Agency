@@ -12,6 +12,8 @@ import type { SignInState } from "../schema";
 interface SignInFormProps {
   defaultEmail: string;
   defaultPassword: string;
+  /** DEMO_MODE deployments pre-fill a shared account and say so on the button. */
+  demoMode: boolean;
   /** Already sanitized by the page; the action sanitizes it again. */
   callbackUrl: string;
   sessionExpired: boolean;
@@ -22,6 +24,7 @@ interface SignInFormProps {
 export function SignInForm({
   defaultEmail,
   defaultPassword,
+  demoMode,
   callbackUrl,
   sessionExpired,
   initialError,
@@ -114,7 +117,7 @@ export function SignInForm({
           </>
         ) : (
           <>
-            Sign in to demo workspace
+            {demoMode ? "Sign in to demo workspace" : "Sign in"}
             <ArrowRight aria-hidden />
           </>
         )}

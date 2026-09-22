@@ -4,10 +4,18 @@
  * "This run covered 24 items". Pure and deliberately small: it is a preview, not a renderer.
  */
 
+import { isTableDelimiterRow } from "@/lib/markdown";
+
 const FENCE_RE = /^\s*(```|~~~)/;
 const HEADING_RE = /^\s{0,3}#{1,6}(\s|$)/;
 const RULE_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-const TABLE_SEPARATOR_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+/**
+ * This runs on untrusted model and web text, so the input is bounded and every scan is linear: the previous
+ * table-separator regex backtracked for 1.5 s on a 50 k whitespace line (INF-17).
+ */
+const MAX_SOURCE_CHARS = 100_000;
+const MAX_LINE_CHARS = 2_000;
 
 /** Inline markdown → text: links/images keep their label, code keeps its content, emphasis markers go. */
 function inlineText(line: string): string {
@@ -26,6 +34,18 @@ function inlineText(line: string): string {
   );
 }
 
+/** `## Title ##` → `Title`, without the quadratic `\s+#+\s*$` tail match. */
+function stripHashes(line: string): string {
+  const withoutOpening = line.replace(/^\s*#+[ \t]*/, "");
+  const trimmed = withoutOpening.trimEnd();
+  let end = trimmed.length;
+  while (end > 0 && trimmed[end - 1] === "#") end -= 1;
+  if (end === trimmed.length) return trimmed;
+  let start = end;
+  while (start > 0 && (trimmed[start - 1] === " " || trimmed[start - 1] === "\t")) start -= 1;
+  return start === end && end !== 0 ? trimmed : trimmed.slice(0, start);
+}
+
 function tableRowText(line: string): string {
   return line
     .trim()
@@ -39,24 +59,26 @@ function tableRowText(line: string): string {
 function blockLines(markdown: string, opts: { keepHeadings: boolean; keepTables: boolean }): string[] {
   const out: string[] = [];
   let fenced = false;
-  for (const raw of markdown.replace(/\r\n?/g, "\n").split("\n")) {
+  const source = markdown.length > MAX_SOURCE_CHARS ? markdown.slice(0, MAX_SOURCE_CHARS) : markdown;
+  for (const line of source.replace(/\r\n?/g, "\n").split("\n")) {
+    const raw = line.length > MAX_LINE_CHARS ? line.slice(0, MAX_LINE_CHARS) : line;
     if (FENCE_RE.test(raw)) {
       fenced = !fenced;
       continue;
     }
-    if (fenced || RULE_RE.test(raw) || TABLE_SEPARATOR_RE.test(raw)) continue;
+    if (fenced || RULE_RE.test(raw) || isTableDelimiterRow(raw, 2)) continue;
     if (HEADING_RE.test(raw)) {
-      if (opts.keepHeadings) out.push(inlineText(raw.replace(/^\s*#+\s*/, "").replace(/\s+#+\s*$/, "")));
+      if (opts.keepHeadings) out.push(inlineText(stripHashes(raw)));
       continue;
     }
     if (/^\s*\|/.test(raw)) {
       if (opts.keepTables) out.push(tableRowText(raw));
       continue;
     }
-    const line = raw
+    const prose = raw
       .replace(/^\s*(>\s*)+/, "")
       .replace(/^\s*([-*+]|\d{1,3}[.)])\s+(\[[ xX]\]\s+)?/, "");
-    out.push(inlineText(line));
+    out.push(inlineText(prose));
   }
   return out;
 }

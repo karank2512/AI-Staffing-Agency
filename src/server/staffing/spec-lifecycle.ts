@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import { JobSpecSchema, type JobSpec } from "@/server/domain";
@@ -28,6 +29,7 @@ function validationError(error: { issues: Array<{ path: PropertyKey[]; message: 
 }
 
 export async function updateJobSpec(s: SessionContext, jobSpecId: string, patch: Partial<JobSpec>): Promise<JobSpec> {
+  assertCan(s, "jobs.manage");
   const row = await getJobSpecRow(s.organizationId, jobSpecId);
   if (row.status !== "DRAFT") throw conflict("Only a draft spec can be edited. Revise the job to create a new draft.");
 
@@ -43,6 +45,7 @@ export async function updateJobSpec(s: SessionContext, jobSpecId: string, patch:
 }
 
 export async function approveJobSpec(s: SessionContext, jobSpecId: string): Promise<void> {
+  assertCan(s, "jobs.manage");
   const row = await getJobSpecRow(s.organizationId, jobSpecId);
   if (row.status === "APPROVED") return; // already done — approving twice is not an error
   if (row.status === "SUPERSEDED") throw conflict("This version of the spec has been superseded; approve the latest draft instead.");
@@ -69,6 +72,7 @@ export async function approveJobSpec(s: SessionContext, jobSpecId: string): Prom
 }
 
 export async function reviseJobSpec(s: SessionContext, jobId: string): Promise<{ jobSpecId: string; spec: JobSpec }> {
+  assertCan(s, "jobs.manage");
   const job = await getJob(s.organizationId, jobId);
   if (job.status !== "DRAFT" && job.status !== "SPEC_APPROVED") throw conflict("This job is already staffed; changes go through the worker's Replace flow.");
 
@@ -87,6 +91,7 @@ export async function reviseJobSpec(s: SessionContext, jobId: string): Promise<{
 }
 
 export async function discardJob(s: SessionContext, jobId: string): Promise<void> {
+  assertCan(s, "jobs.manage");
   const job = await getJob(s.organizationId, jobId);
   if (job.status !== "DRAFT" && job.status !== "SPEC_APPROVED") throw conflict("Only an unstaffed job can be discarded.");
   const workers = await db.worker.count({ where: { jobId: job.id } });

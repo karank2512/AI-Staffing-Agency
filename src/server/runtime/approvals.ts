@@ -1,6 +1,8 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import { db, toJson } from "@/server/db";
 import { conflict, notFound } from "@/server/errors";
+import { tools } from "@/server/tools";
 import { transitionRun } from "./transitions";
 import type { DecideApprovalArgs } from "./types";
 
@@ -39,8 +41,13 @@ type Outcome =
 
 export async function decideApproval(args: DecideApprovalArgs): Promise<void> {
   const { organizationId, approvalId, userId, decision } = args;
-  const user = await db.user.findFirst({ where: { id: userId, organizationId }, select: { name: true } });
+  // The args carry only a userId, so the deciding user's role is re-read here rather than trusted from a caller.
+  const user = await db.user.findFirst({ where: { id: userId, organizationId }, select: { name: true, role: true } });
   if (!user) throw notFound("User");
+  assertCan(user, "approvals.decide");
+  // Letting a worker act outside the workspace (send an email, post a message) is an admin decision (F-006).
+  const head = await db.approval.findFirst({ where: { id: approvalId, organizationId }, select: { toolName: true } });
+  if (head && tools.get(head.toolName)?.sideEffect === "external_write") assertCan(user, "approvals.decideExternal");
   const now = new Date();
   const note = args.note?.trim() || undefined;
 

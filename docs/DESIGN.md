@@ -815,3 +815,12 @@ IMPLEMENTATION GUARDRAILS
 - Keep class names static (no `bg-${tone}`). The redesigned TONE_CLASSES map references the new token utilities (text-success, bg-warning-soft…).
 - Don't introduce dark mode in this pass. Keep `@custom-variant dark` class-scoped as today.
 - After the change, run an axe or contrast check. #86868b must never be used for body text under 18px.
+
+## Implementation notes (wave B, design-foundation)
+
+Two things bite silently if you don't know them, so they are settled once in the foundation:
+
+- **`cn()` must know the type scale.** tailwind-merge reads any `text-<unknown>` as a text *colour*, so an unconfigured `cn("text-footnote", "text-muted-foreground")` drops the size. `src/lib/utils.ts` exports a `createCn(...)` instance that registers every `@utility text-*` role as a font size. **Import `cn` from `@/lib/utils`, never from the bare `cn` package** — `tests/ui/cn.test.ts` enforces both halves.
+- **The font stacks keep a literal fallback: `var(--font-inter, "Inter")`.** An unresolved `var()` makes the whole `font-family` invalid at computed-value time and the page renders in the browser's default serif. The fallback matters for any tree rendered outside the root `<html>` — `app/global-error.tsx` replaces the root layout and therefore never gets next/font's variable.
+- Focus is one base rule (`:focus-visible { box-shadow: var(--focus-ring) }`). A component that already carries a `shadow-*` utility would replace it, so those add `focus-visible:ring-4 focus-visible:ring-primary/30` instead (Tailwind's ring and shadow compose). The base rule does not set `border-radius: inherit`: a box-shadow already follows the element's own radius, and inheriting one would reshape elements that have none.
+- Toasts sit top-center (one position, no viewport-dependent switch), which is the one place this implementation diverges from the "bottom-center on mobile, top-right on desktop" line above.

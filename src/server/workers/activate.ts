@@ -1,4 +1,5 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson, type DbTx } from "@/server/db";
 import { cadenceToWorkerFields, computeNextRunAt, safeParseBlueprint, type ToolRequirement, type WorkerBlueprint } from "@/server/domain";
@@ -118,6 +119,7 @@ async function cancelOutgoingQueuedRuns(s: SessionContext, versionId: string): P
 }
 
 export async function activateVersion(s: SessionContext, versionId: string, opts: { newName?: string } = {}): Promise<void> {
+  assertCan(s, "workers.manage");
   const newName = opts.newName === undefined ? undefined : cleanName(opts.newName);
   const cancelledQueued = await cancelOutgoingQueuedRuns(s, versionId);
 

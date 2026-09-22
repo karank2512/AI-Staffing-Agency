@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { runAction, type ActionResult } from "@/lib/action-result";
 import { requireSession } from "@/server/auth";
 import { deleteCredential, setCredential } from "@/server/secrets";
+import { limitCredentialsAction, ToolNameSchema } from "../_lib/action-guards";
 import { SetCredentialInputSchema } from "./schema";
 
 /**
@@ -13,6 +14,7 @@ import { SetCredentialInputSchema } from "./schema";
 export async function setCredentialAction(input: { name: string; value: string; label?: string }): Promise<ActionResult> {
   return runAction(async () => {
     const s = await requireSession();
+    await limitCredentialsAction(s);
     const parsed = SetCredentialInputSchema.parse(input);
     await setCredential(s, parsed);
     revalidatePath("/settings");
@@ -23,7 +25,8 @@ export async function setCredentialAction(input: { name: string; value: string; 
 export async function deleteCredentialAction(name: string): Promise<ActionResult> {
   return runAction(async () => {
     const s = await requireSession();
-    await deleteCredential(s, name);
+    await limitCredentialsAction(s);
+    await deleteCredential(s, ToolNameSchema.parse(name));
     revalidatePath("/settings");
   });
 }

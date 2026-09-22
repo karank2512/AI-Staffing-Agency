@@ -1,4 +1,3 @@
-import { FlaskConical } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -6,33 +5,35 @@ export const SIMULATED_EXPLANATION =
   "No model API keys detected — workers run on a deterministic simulator. Add keys in .env to go live.";
 
 export interface SimulatedBadgeProps {
+  /** Dot only, for the mobile nav where the word would crowd the bar. The label moves to the accessible name. */
+  dotOnly?: boolean;
   className?: string;
 }
 
 /**
- * The "Simulated" marker. Rendered globally by AppShell when the platform has no live model provider, and by
- * pages next to anything produced in simulated mode (`Run.simulated`, tool calls, usage rows). Render it
- * conditionally — the component itself is unconditional.
+ * The "Simulated" marker: a quiet neutral chip with one amber dot. It appears once globally in the nav, and
+ * inline in the meta line of artifacts that were generated (runs, deliverables, usage) — never on a section
+ * heading or a stat.
  */
-export function SimulatedBadge({ className }: SimulatedBadgeProps) {
+export function SimulatedBadge({ dotOnly = false, className }: SimulatedBadgeProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span
           data-slot="simulated-badge"
           tabIndex={0}
+          aria-label={dotOnly ? "Simulated" : undefined}
           className={cn(
-            "inline-flex h-5.5 w-fit shrink-0 cursor-help items-center gap-1 rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 text-xs font-medium whitespace-nowrap text-amber-800 outline-none focus-visible:ring-2 focus-visible:ring-amber-300",
+            "inline-flex h-[22px] w-fit shrink-0 cursor-help items-center gap-1.5 rounded-full bg-muted text-caption font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_0_0_0.5px_var(--hairline)] outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
+            dotOnly ? "w-[22px] justify-center" : "px-2.5",
             className,
           )}
         >
-          <FlaskConical className="size-3" aria-hidden="true" />
-          Simulated
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-warning" />
+          {dotOnly ? null : "Simulated"}
         </span>
       </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-64 text-pretty">
-        {SIMULATED_EXPLANATION}
-      </TooltipContent>
+      <TooltipContent side="bottom">{SIMULATED_EXPLANATION}</TooltipContent>
     </Tooltip>
   );
 }

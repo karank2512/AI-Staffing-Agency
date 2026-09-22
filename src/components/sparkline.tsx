@@ -4,10 +4,12 @@ export interface SparklineProps {
   /** Chronological series (oldest first). Non-finite entries are ignored. */
   values: number[];
   /**
-   * Sizing + colour. The line uses `currentColor`, so set colour with a text class:
-   * `<Sparkline values={trend} className="h-8 w-28 text-emerald-500" />`. Default: `h-6 w-20 text-primary`.
+   * Sizing + colour. The line uses `currentColor`, so set colour with a text class. The default is deliberately
+   * quiet — `h-7 w-20 text-foreground/40` — because a sparkline is context, not the headline.
    */
   className?: string;
+  /** Fill the area under the line at 8%. Off by default; use it only inside a chart card, never in a stat. */
+  fill?: boolean;
 }
 
 const WIDTH = 100;
@@ -15,9 +17,9 @@ const HEIGHT = 28;
 const PAD = 2.5;
 
 /** Tiny inline trend line (score trend, daily cost). Pure SVG — no chart library, works in server components. */
-export function Sparkline({ values, className }: SparklineProps) {
+export function Sparkline({ values, className, fill = false }: SparklineProps) {
   const series = values.filter((v) => Number.isFinite(v));
-  const classes = cn("inline-block h-6 w-20 overflow-visible text-primary", className);
+  const classes = cn("inline-block h-7 w-20 overflow-visible text-foreground/40", className);
 
   if (series.length === 0) {
     // Keep the footprint so rows with and without data stay aligned.
@@ -59,7 +61,7 @@ export function Sparkline({ values, className }: SparklineProps) {
       role="img"
       aria-label={`Trend over ${series.length} points, latest ${series[series.length - 1]}`}
     >
-      {series.length > 1 ? <path d={area} fill="currentColor" fillOpacity={0.08} stroke="none" /> : null}
+      {fill && series.length > 1 ? <path d={area} fill="currentColor" fillOpacity={0.08} stroke="none" /> : null}
       {series.length > 1 ? (
         <path
           d={line}

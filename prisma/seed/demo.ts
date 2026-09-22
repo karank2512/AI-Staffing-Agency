@@ -66,7 +66,9 @@ async function build(db: PrismaClient, now: Date, log: (line: string) => void): 
   await reset(db);
   const createdAt = new Date(now.getTime() - 22 * DAY_MS);
   const organization = await db.organization.create({
-    data: { id: DEMO_IDS.organizationId, name: DEMO_USER.organizationName, slug: DEMO_USER.organizationSlug, createdAt, updatedAt: createdAt },
+    // isDemo marks this workspace as seeded sample data: the UI badges it and operators can tell it apart from a
+    // real tenant in any deployment that chose to run the demo seed.
+    data: { id: DEMO_IDS.organizationId, name: DEMO_USER.organizationName, slug: DEMO_USER.organizationSlug, isDemo: true, createdAt, updatedAt: createdAt },
   });
   const user = await db.user.create({
     data: {

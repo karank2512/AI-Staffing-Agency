@@ -93,7 +93,8 @@ export function ProvidersCard({ providers }: { providers: SettingsProviders }) {
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Code>{t.overrideEnvVar}</Code>
+                      {/* Env var names are operator config: null for everyone but the owner (audit INF-19). */}
+                      {t.overrideEnvVar ? <Code>{t.overrideEnvVar}</Code> : <span className="text-xs text-muted-foreground">—</span>}
                     </TableCell>
                   </TableRow>
                 ))}

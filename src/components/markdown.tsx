@@ -13,6 +13,11 @@ import { cn } from "@/lib/utils";
 export interface MarkdownProps {
   /** Markdown source (deliverable report, review narrative, chat reply). `null`/empty renders nothing. */
   content: string | null | undefined;
+  /**
+   * `article` (default) is the 17px reading view used for deliverables. `compact` is the 15px version for
+   * chat replies, review narratives and anything inside a dense card.
+   */
+  variant?: "article" | "compact";
   className?: string;
 }
 
@@ -27,12 +32,12 @@ function alignClass(align: TableAlign | undefined): string | null {
 }
 
 const HEADING_CLASS: Record<1 | 2 | 3 | 4 | 5 | 6, string> = {
-  1: "mt-7 mb-3 text-lg leading-7 font-semibold tracking-tight text-foreground",
-  2: "mt-7 mb-2.5 text-base leading-6 font-semibold tracking-tight text-foreground",
-  3: "mt-5 mb-2 text-sm leading-6 font-semibold text-foreground",
-  4: "mt-4 mb-1.5 text-sm leading-6 font-medium text-foreground",
-  5: "mt-4 mb-1.5 text-[13px] leading-5 font-medium text-muted-foreground",
-  6: "mt-4 mb-1.5 text-xs leading-5 font-medium tracking-wide text-muted-foreground uppercase",
+  1: "mt-10 mb-4 text-[2em] leading-[1.2] font-semibold tracking-[-0.02em] text-balance text-foreground",
+  2: "mt-10 mb-3 text-[1.294em] leading-[1.27] font-semibold tracking-[-0.012em] text-balance text-foreground",
+  3: "mt-7 mb-2 text-[1em] leading-[1.35] font-semibold tracking-[-0.022em] text-foreground",
+  4: "mt-6 mb-2 text-[1em] leading-[1.35] font-medium text-foreground",
+  5: "mt-5 mb-1.5 text-[0.88em] leading-[1.4] font-semibold text-muted-foreground",
+  6: "mt-5 mb-1.5 text-[0.88em] leading-[1.4] font-medium text-muted-foreground",
 };
 
 function renderInline(nodes: InlineNode[]): ReactNode[] {
@@ -60,7 +65,7 @@ function renderInline(nodes: InlineNode[]): ReactNode[] {
         return (
           <code
             key={i}
-            className="rounded-[5px] border border-border/70 bg-muted/70 px-1 py-px font-mono text-[0.86em] text-foreground"
+            className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.82em] text-foreground"
           >
             {node.value}
           </code>
@@ -72,7 +77,7 @@ function renderInline(nodes: InlineNode[]): ReactNode[] {
             key={i}
             href={node.href}
             {...(external ? { target: "_blank", rel: "noopener noreferrer nofollow" } : {})}
-            className="font-medium break-words text-primary underline decoration-primary/30 underline-offset-[3px] transition-colors hover:decoration-primary"
+            className="break-words text-link underline-offset-[0.15em] hover:underline"
           >
             {renderInline(node.children)}
           </a>
@@ -92,7 +97,7 @@ function renderListItem(item: ListItemNode, key: number): ReactNode {
           aria-checked={item.checked === true}
           aria-disabled="true"
           className={cn(
-            "mt-1 flex size-3.5 shrink-0 items-center justify-center rounded-[4px] border",
+            "mt-1 flex size-4 shrink-0 items-center justify-center rounded-[5px] border",
             item.checked ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background",
           )}
         >
@@ -120,14 +125,14 @@ function renderBlocks(blocks: BlockNode[], nested = false): ReactNode[] {
       }
       case "paragraph":
         return (
-          <p key={i} className={nested ? "my-1.5" : "my-3"}>
+          <p key={i} className={nested ? "my-2" : "my-4 text-pretty"}>
             {renderInline(block.children)}
           </p>
         );
       case "list": {
         const className = cn(
-          "space-y-1.5 pl-5 marker:text-muted-foreground/80",
-          nested ? "my-1.5" : "my-3",
+          "space-y-2 pl-6 marker:text-tertiary",
+          nested ? "my-2" : "my-4",
           block.ordered ? "list-decimal marker:font-medium marker:tabular-nums" : "list-disc",
         );
         const items = block.items.map(renderListItem);
@@ -143,29 +148,27 @@ function renderBlocks(blocks: BlockNode[], nested = false): ReactNode[] {
       }
       case "code":
         return (
-          <div key={i} className="my-4 overflow-hidden rounded-lg border border-border bg-slate-50">
+          <div key={i} className="my-5 overflow-hidden rounded-lg bg-muted">
             {block.lang ? (
-              <div className="border-b border-border/70 px-3 py-1 font-mono text-[11px] text-muted-foreground">
-                {block.lang}
-              </div>
+              <div className="px-4 pt-3 font-mono text-caption text-tertiary">{block.lang}</div>
             ) : null}
-            <pre className="overflow-x-auto p-3 font-mono text-[12.5px] leading-5 text-slate-800">
+            <pre className="overflow-x-auto p-4 font-mono text-[13px] leading-5 text-foreground">
               <code>{block.value}</code>
             </pre>
           </div>
         );
       case "table":
         return (
-          <div key={i} className="my-4 overflow-x-auto rounded-lg border border-border bg-card">
-            <table className="w-full border-collapse text-left text-[13px] leading-5">
+          <div key={i} className="my-5 overflow-x-auto rounded-lg bg-card">
+            <table className="w-full border-collapse text-left text-[15px] leading-6">
               <thead>
-                <tr className="border-b border-border bg-muted/50">
+                <tr className="border-b border-border">
                   {block.header.map((cell, c) => (
                     <th
                       key={c}
                       scope="col"
                       className={cn(
-                        "px-3 py-2 text-xs font-medium whitespace-nowrap text-muted-foreground",
+                        "h-11 px-4 text-[13px] font-semibold whitespace-nowrap text-muted-foreground",
                         alignClass(block.align[c]),
                       )}
                     >
@@ -174,14 +177,14 @@ function renderBlocks(blocks: BlockNode[], nested = false): ReactNode[] {
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border/70">
+              <tbody className="divide-y divide-border">
                 {block.rows.map((row, r) => (
-                  <tr key={r} className="transition-colors hover:bg-muted/40">
+                  <tr key={r} className="transition-colors duration-200 hover:bg-[#f9f9fb]">
                     {row.map((cell, c) => (
                       <td
                         key={c}
                         className={cn(
-                          "min-w-24 px-3 py-2 align-top tabular-nums",
+                          "min-w-24 px-4 py-3 align-top tabular-nums",
                           alignClass(block.align[c]),
                         )}
                       >
@@ -198,13 +201,13 @@ function renderBlocks(blocks: BlockNode[], nested = false): ReactNode[] {
         return (
           <blockquote
             key={i}
-            className="my-4 border-l-2 border-primary/30 pl-4 text-muted-foreground [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+            className="my-5 border-l-[3px] border-input pl-5 text-muted-foreground [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
           >
             {renderBlocks(block.children)}
           </blockquote>
         );
       case "hr":
-        return <hr key={i} className="my-6 border-border" />;
+        return <hr key={i} className="my-8 border-border" />;
     }
   });
 }
@@ -214,14 +217,16 @@ function renderBlocks(blocks: BlockNode[], nested = false): ReactNode[] {
  * elements — there is no HTML string and no `dangerouslySetInnerHTML`, so model output can never inject markup.
  * Works in server and client components.
  */
-export function Markdown({ content, className }: MarkdownProps) {
+export function Markdown({ content, variant = "article", className }: MarkdownProps) {
   const blocks = parseMarkdown(content);
   if (blocks.length === 0) return null;
   return (
     <div
       data-slot="markdown"
+      data-variant={variant}
       className={cn(
-        "max-w-none text-sm leading-6 break-words text-foreground/90 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        "leading-[1.6] break-words text-foreground [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        variant === "article" ? "max-w-[720px] text-[17px] tracking-[-0.022em]" : "max-w-none text-[15px]",
         className,
       )}
     >

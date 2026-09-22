@@ -1,5 +1,6 @@
 import type { VersionChangeReason } from "@prisma/client";
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson, type DbOrTx } from "@/server/db";
 import type { ReplacementAnalysis, WorkerBlueprint } from "@/server/domain";
@@ -116,6 +117,7 @@ export async function createProposedVersion(args: CreateProposedVersionArgs): Pr
 }
 
 export async function rejectProposedVersion(s: SessionContext, versionId: string): Promise<void> {
+  assertCan(s, "workers.manage");
   const version = await loadVersion(s.organizationId, versionId);
   if (version.status !== "PROPOSED") {
     throw conflict(`Version ${version.version} is ${versionLabel(version.status)} and is not awaiting a decision`);

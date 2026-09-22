@@ -3,12 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
+    "prebuild": "node scripts/generate-migrations-manifest.mjs",
     "build": "next build",
     "start": "next start",
-    "build:worker": "esbuild src/worker.ts --bundle --platform=node --target=node20 --format=esm --packages=external --tsconfig=tsconfig.json --outfile=dist/worker.mjs",
+    "start:web": "node .next/standalone/server.js",
+    "migrations:manifest": "node scripts/generate-migrations-manifest.mjs",
+    "build:worker": "esbuild src/worker.ts --bundle --platform=node --target=node22 --format=cjs --packages=external --tsconfig=tsconfig.json --outfile=dist/worker.cjs",
     "worker": "tsx src/worker.ts",
-    "start:worker": "node dist/worker.mjs",
+    "start:worker": "node dist/worker.cjs",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -19,8 +22,10 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:demo": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force",
-    "setup": "prisma migrate deploy && tsx prisma/seed.ts",
-    "audit:prod": "npm audit --omit=dev --audit-level=high"
+    "setup": "prisma migrate deploy",
+    "setup:dev": "prisma migrate deploy && tsx prisma/seed.ts",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "dev:web": "next dev"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.102",

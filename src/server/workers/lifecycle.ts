@@ -1,4 +1,5 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db } from "@/server/db";
 import { CadenceSchema, cadenceToWorkerFields, computeNextRunAt, describeCadence, workerFieldsToCadence, type Cadence } from "@/server/domain";
@@ -16,6 +17,7 @@ const MAX_INSTRUCTIONS = 10;
 const MAX_INSTRUCTION_CHARS = 2_000;
 
 export async function pauseWorker(s: SessionContext, workerId: string): Promise<void> {
+  assertCan(s, "workers.manage");
   const worker = await loadWorker(s.organizationId, workerId);
   if (worker.status === "RETIRED") throw conflict(`${worker.name} is retired and cannot be paused`);
   if (worker.status === "PAUSED") throw conflict(`${worker.name} is already paused`);
@@ -41,6 +43,7 @@ export async function pauseWorker(s: SessionContext, workerId: string): Promise<
 }
 
 export async function resumeWorker(s: SessionContext, workerId: string): Promise<void> {
+  assertCan(s, "workers.manage");
   const worker = await loadWorker(s.organizationId, workerId);
   if (worker.status === "RETIRED") throw conflict(`${worker.name} is retired; hire a new worker for this job instead`);
   if (worker.status === "ACTIVE") throw conflict(`${worker.name} is already active`);
@@ -66,6 +69,7 @@ export async function resumeWorker(s: SessionContext, workerId: string): Promise
 }
 
 export async function retireWorker(s: SessionContext, workerId: string): Promise<void> {
+  assertCan(s, "workers.manage");
   const worker = await loadWorker(s.organizationId, workerId);
   if (worker.status === "RETIRED") throw conflict(`${worker.name} is already retired`);
 
@@ -103,6 +107,7 @@ export async function retireWorker(s: SessionContext, workerId: string): Promise
 }
 
 export async function updateSchedule(s: SessionContext, workerId: string, schedule: Cadence): Promise<void> {
+  assertCan(s, "workers.manage");
   const parsed = CadenceSchema.safeParse(schedule);
   if (!parsed.success) throw invalid("That schedule is not valid", { issues: parsed.error.issues });
   const cadence = parsed.data;
@@ -133,6 +138,7 @@ export async function updateToolGrant(
   toolName: string,
   patch: { requiresApproval?: boolean; revoked?: boolean },
 ): Promise<void> {
+  assertCan(s, "workers.manage");
   const definition = tools.get(toolName);
   if (!definition) throw invalid(`Unknown tool "${toolName}"`);
   const worker = await loadWorker(s.organizationId, workerId);
@@ -185,6 +191,7 @@ function cleanInstructions(instructions: readonly string[] | undefined): string[
 
 /** "Run now" — the runtime verifies the worker is active and org-scoped, locks the version and queues the run. */
 export async function startRun(s: SessionContext, workerId: string, opts: { instructions?: string[] } = {}): Promise<{ runId: string }> {
+  assertCan(s, "workers.run");
   const instructions = cleanInstructions(opts.instructions);
   return enqueueRun({
     organizationId: s.organizationId,

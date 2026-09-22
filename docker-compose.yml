@@ -1,0 +1,92 @@
+# Local/staging stack: Postgres, a one-shot migration job, the web tier and the run worker.
+#
+#   cp .env.example .env    # fill in AUTH_SECRET and CREDENTIAL_ENCRYPTION_KEY
+#   docker compose up --build
+#
+# Secrets are never baked into an image: every service reads .env at run time. DATABASE_URL is overridden here
+# because the database is reachable as "db" on the compose network, not on localhost.
+
+name: ai-staffing-agency
+
+x-app: &app
+  build:
+    context: .
+    target: runner
+    args:
+      APP_VERSION: ${APP_VERSION:-compose}
+  env_file: .env
+  environment:
+    NODE_ENV: production
+    TZ: UTC
+    DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-ai_staffing_agency}?schema=public&connection_limit=10&pool_timeout=20
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_staffing_agency}
+      TZ: UTC
+      PGTZ: UTC
+    # The app stores UTC and several queries compare against now(); pin the server clock to UTC.
+    command: ["postgres", "-c", "timezone=UTC", "-c", "log_min_duration_statement=1000"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-ai_staffing_agency}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+
+  # Release step. Runs to completion before web and worker start, so the schema is never behind the code.
+  migrate:
+    <<: *app
+    command: ["npx", "prisma", "migrate", "deploy"]
+    restart: "no"
+
+  web:
+    <<: *app
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      SERVICE_NAME: web
+      EXECUTOR_MODE: "off"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-ai_staffing_agency}?schema=public&connection_limit=10&pool_timeout=20
+    command: ["node", "server.js"]
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    environment:
+      NODE_ENV: production
+      TZ: UTC
+      SERVICE_NAME: worker
+      # Below stop_grace_period, so leases are handed back before Docker sends SIGKILL.
+      SHUTDOWN_GRACE_MS: "20000"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-ai_staffing_agency}?schema=public&connection_limit=10&pool_timeout=20
+    command: ["node", "dist/worker.cjs"]
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

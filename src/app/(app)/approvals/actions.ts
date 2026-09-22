@@ -5,11 +5,13 @@ import { runAction, type ActionResult } from "@/lib/action-result";
 import { requireSession } from "@/server/auth";
 import { getApprovalRefs } from "@/server/queries/approvals";
 import { decideApproval } from "@/server/runtime";
+import { parseId } from "../_lib/action-guards";
 import { DecisionInputSchema, type Decision } from "./schema";
 
 /**
  * Approve or reject a pending request. Used by /approvals and by the "Needs your attention" strip on /workforce,
- * so every surface that shows the request (or the run it pauses) is revalidated here.
+ * so every surface that shows the request (or the run it pauses) is revalidated here. The decision itself is
+ * authorized inside `decideApproval`, which re-reads the deciding user's role (external sends need an admin).
  */
 export async function decideApprovalAction(
   approvalId: string,
@@ -18,7 +20,7 @@ export async function decideApprovalAction(
 ): Promise<ActionResult<{ workerName: string | null }>> {
   return runAction(async () => {
     const s = await requireSession();
-    const input = DecisionInputSchema.parse({ approvalId, decision, note });
+    const input = DecisionInputSchema.parse({ approvalId: parseId(approvalId, "Approval request"), decision, note });
     // Looked up before the decision: it is org-scoped, so a foreign id simply yields no pages to revalidate
     // (decideApproval itself rejects it with NOT_FOUND).
     const refs = await getApprovalRefs(s.organizationId, input.approvalId);

@@ -1,11 +1,14 @@
 import { Prisma } from "@prisma/client";
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import { cadenceToWorkerFields, computeNextRunAt, describeCadence, type WorkerBlueprint } from "@/server/domain";
 import { conflict, errorMessage, invalid, notFound } from "@/server/errors";
 import { enqueueRun } from "@/server/runtime";
+import { assertOrgActive } from "@/server/security";
 import { tools } from "@/server/tools";
+import { assertHeadcount } from "./headcount";
 import { parseProposal, parseStoredSpec } from "./jobs";
 import { avatarColorFor } from "./persona";
 
@@ -35,6 +38,9 @@ export async function hireWorker(
   jobId: string,
   opts: { name?: string; startFirstRun?: boolean } = {},
 ): Promise<{ workerId: string; versionId: string; runId?: string }> {
+  assertCan(s, "workers.hire");
+  await assertOrgActive(s.organizationId);
+
   const hired = await db.$transaction(async (tx) => {
     // Lock the job row so two "Hire" clicks cannot both pass the checks below and seat two workers.
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "Job" WHERE "id" = ${jobId} AND "organizationId" = ${s.organizationId} FOR UPDATE`;
@@ -43,6 +49,7 @@ export async function hireWorker(
 
     const seated = await tx.worker.count({ where: { jobId: job.id, status: { not: "RETIRED" } } });
     if (seated > 0) throw conflict("This job already has a worker. Retire or replace them instead of hiring another.");
+    await assertHeadcount(s.organizationId, { tx });
     if (job.status !== "DRAFT" && job.status !== "SPEC_APPROVED") throw conflict("This job is not open for hiring.");
 
     const proposal = parseProposal(job.pendingProposal);

@@ -1,0 +1,32 @@
+# Keep the build context small and make sure no local secret or build artefact is ever baked into an image.
+.git
+.github
+node_modules
+.next
+out
+build
+dist
+coverage
+
+# Secrets: .env.example / .env.test.example are documentation and stay out too — the image is configured
+# entirely through the environment.
+.env
+.env.*
+
+# Local tooling and editor state
+.claude
+.vscode
+.idea
+.DS_Store
+*.tsbuildinfo
+npm-debug.log*
+
+# Not needed to build or run the image
+tests
+docs
+README.md
+CLAUDE.md
+components.json
+Dockerfile
+docker-compose.yml
+.dockerignore

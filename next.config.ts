@@ -34,6 +34,19 @@ const nextConfig: NextConfig = {
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
+  /**
+   * Because the app has middleware, Next also compiles `instrumentation.ts` for the Edge runtime. Its
+   * `import("@/server/runtime")` is guarded by `NEXT_RUNTIME === "nodejs"` and never executes there, but webpack
+   * still follows it and fails on the Node built-ins the tools layer needs (node:net, node:dns, node:http…).
+   * Resolving that one specifier to an empty module in the Edge compiler keeps the guard honest and the build green.
+   * `$` makes it an exact match, so `@/server/runtime/types` (pure types used by client components) still resolves.
+   */
+  webpack(config, { nextRuntime }) {
+    if (nextRuntime === "edge") {
+      config.resolve.alias = { ...config.resolve.alias, "@/server/runtime$": false };
+    }
+    return config;
+  },
   experimental: {
     serverActions: {
       // Largest legitimate payload is a job description / chat message; keep the ceiling tight.

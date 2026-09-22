@@ -77,20 +77,48 @@ export const ScopeJobInputSchema = z
 // ── Clarify step ────────────────────────────────────────────────────────────
 
 export const MAX_ANSWER_CHARS = 1_000;
+/** The scoper asks at most 3 questions; anything beyond a handful of answers is a scripted client (INF-15). */
+export const MAX_ANSWERS = 10;
 
 /** questionId → answer; blank answers are kept (the server drops them) so "skip" is just an empty string. */
-export const AnswersSchema = z.record(z.string().min(1).max(64), z.string().max(MAX_ANSWER_CHARS, "Keep each answer under 1,000 characters."));
+export const AnswersSchema = z
+  .record(z.string().min(1).max(64), z.string().max(MAX_ANSWER_CHARS, "Keep each answer under 1,000 characters."))
+  .refine((answers) => Object.keys(answers).length <= MAX_ANSWERS, `Answer at most ${MAX_ANSWERS} questions.`);
 export type Answers = z.infer<typeof AnswersSchema>;
 
 // ── Job spec step ───────────────────────────────────────────────────────────
 
 /** The light inline edits the review form allows. Everything else in the spec stays as scoped. */
+export const SUMMARY_MAX_CHARS = 2_000;
+export const OBJECTIVE_MAX_CHARS = 1_000;
+export const RESPONSIBILITY_MAX_CHARS = 300;
+
+/**
+ * Every string is bounded: the patch is stored in the JobSpec and rendered into the job brief of every future
+ * run, so an unbounded field is paid for on every LLM call forever (audit F-011).
+ */
 export const SpecPatchSchema = z.object({
   title: z.string().trim().min(3, "Give the job a title of at least 3 characters.").max(120, "Keep the title under 120 characters.").optional(),
-  summary: z.string().trim().min(10, "The summary needs at least 10 characters.").optional(),
-  objective: z.string().trim().min(10, "The objective needs at least 10 characters.").optional(),
+  summary: z
+    .string()
+    .trim()
+    .min(10, "The summary needs at least 10 characters.")
+    .max(SUMMARY_MAX_CHARS, `Keep the summary under ${SUMMARY_MAX_CHARS.toLocaleString("en-US")} characters.`)
+    .optional(),
+  objective: z
+    .string()
+    .trim()
+    .min(10, "The objective needs at least 10 characters.")
+    .max(OBJECTIVE_MAX_CHARS, `Keep the objective under ${OBJECTIVE_MAX_CHARS.toLocaleString("en-US")} characters.`)
+    .optional(),
   responsibilities: z
-    .array(z.string().trim().min(3, "Each responsibility needs at least 3 characters."))
+    .array(
+      z
+        .string()
+        .trim()
+        .min(3, "Each responsibility needs at least 3 characters.")
+        .max(RESPONSIBILITY_MAX_CHARS, `Keep each responsibility under ${RESPONSIBILITY_MAX_CHARS} characters.`),
+    )
     .min(1, "List at least one responsibility.")
     .max(8, "Keep it to 8 responsibilities.")
     .optional(),

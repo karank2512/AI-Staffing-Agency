@@ -145,7 +145,16 @@ describe("hire page: read model", () => {
 
     const hired = await hireWorker(t.session, scoped.jobId, { name: "Nova", startFirstRun: false });
     view = await getHireView(t.organization.id, scoped.jobId);
-    expect(view).toEqual({ kind: "staffed", jobId: scoped.jobId, status: "STAFFED", workerId: hired.workerId });
+    expect(view).toEqual({
+      kind: "staffed",
+      jobId: scoped.jobId,
+      status: "STAFFED",
+      workerId: hired.workerId,
+      permissions: { "jobs.manage": false, "workers.hire": false, "workers.manage": false },
+    });
+    // With a role the page passes its own capabilities through to the client (wave C hides what you cannot do).
+    const asOwner = await getHireView(t.organization.id, scoped.jobId, { role: "OWNER" });
+    expect(asOwner.permissions).toEqual({ "jobs.manage": true, "workers.hire": true, "workers.manage": true });
     expect((await listOpenHireJobs(t.organization.id)).map((j) => j.id)).not.toContain(scoped.jobId);
 
     expect(await getHiredWorkerSummary(t.organization.id, hired.workerId)).toEqual({ name: "Nova", title: proposal.blueprint.persona.title });
@@ -155,7 +164,13 @@ describe("hire page: read model", () => {
     await db.worker.update({ where: { id: hired.workerId }, data: { status: "RETIRED", retiredAt: new Date() } });
     await db.job.update({ where: { id: scoped.jobId }, data: { status: "CLOSED" } });
     view = await getHireView(t.organization.id, scoped.jobId);
-    expect(view).toEqual({ kind: "staffed", jobId: scoped.jobId, status: "CLOSED", workerId: null });
+    expect(view).toEqual({
+      kind: "staffed",
+      jobId: scoped.jobId,
+      status: "CLOSED",
+      workerId: null,
+      permissions: { "jobs.manage": false, "workers.hire": false, "workers.manage": false },
+    });
   });
 
   it("scopes the three example jobs onto distinct families with clean titles and the promised formats", async () => {

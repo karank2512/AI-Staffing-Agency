@@ -75,6 +75,8 @@ describe("credentials → JWT cookie → session", () => {
       id: org.user.id,
       organizationId: org.organization.id,
       role: "OWNER",
+      // Carried through so getSession() can compare it against the user row and revoke stale cookies.
+      sessionVersion: 0,
       email: org.user.email,
       name: org.user.name,
     });

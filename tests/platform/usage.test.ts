@@ -2,6 +2,7 @@ import { format, subDays } from "date-fns";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { db, toJson } from "@/server/db";
 import { AppError } from "@/server/errors";
+import { currentSpendMonth, getBudgetStatus } from "@/server/security";
 import { getUsageSummary, getWorkerCostSummary, recordUsage } from "@/server/usage";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker } from "../helpers/fixtures";
@@ -129,6 +130,39 @@ describe("usage: recordUsage", () => {
     const row = await db.usageRecord.findFirstOrThrow({ where: { organizationId: t.organization.id, resource: "backfill-tool" } });
     expect(row.workerId).toBe(hired.worker.id);
     expect(row.jobId).toBe(hired.job.id);
+  });
+});
+
+describe("usage: real spend → OrgSpendMonth", () => {
+  let t: TestOrg;
+  beforeAll(async () => {
+    t = await createTestOrg("platform-spend");
+  });
+  afterAll(async () => {
+    await t.cleanup();
+  });
+
+  const monthRow = (organizationId: string) =>
+    db.orgSpendMonth.findUnique({ where: { organizationId_month: { organizationId, month: currentSpendMonth() } } });
+
+  it("counts only real spend, atomically and in the same transaction as the ledger row", async () => {
+    const base = { organizationId: t.organization.id, kind: "MODEL" as const, provider: "anthropic", resource: "claude-live" };
+    await recordUsage({ ...base, resource: "simulated-call", provider: "mock", costUsd: 3, simulated: true });
+    expect(await monthRow(t.organization.id)).toBeNull(); // simulated runs never touch the operator's bill
+
+    await Promise.all(Array.from({ length: 5 }, () => recordUsage({ ...base, costUsd: 0.02, simulated: false })));
+    expect(Number((await monthRow(t.organization.id))?.costUsd)).toBeCloseTo(0.1, 6);
+
+    // A zero-cost live call (a free tool) adds a ledger row but no spend.
+    await recordUsage({ ...base, kind: "TOOL", provider: "tool", resource: "fetch_url", costUsd: 0, simulated: false });
+    expect(Number((await monthRow(t.organization.id))?.costUsd)).toBeCloseTo(0.1, 6);
+    expect(await db.usageRecord.count({ where: { organizationId: t.organization.id } })).toBe(7);
+
+    // getBudgetStatus reads that same row, so the budget check stays O(1).
+    await db.organization.update({ where: { id: t.organization.id }, data: { monthlyBudgetUsd: "0.05" } });
+    const status = await getBudgetStatus(t.organization.id);
+    expect(status).toMatchObject({ month: currentSpendMonth(), budgetUsd: 0.05, exceeded: true });
+    expect(status.spentUsd).toBeCloseTo(0.1, 6);
   });
 });
 

@@ -1,10 +1,11 @@
-import type { JobStatus } from "@prisma/client";
+import type { JobStatus, UserRole } from "@prisma/client";
 import { db } from "@/server/db";
 import { JOB_FAMILY_INFO, type JobFamily } from "@/server/domain";
 import { isAppError, notFound } from "@/server/errors";
 import { getHireFlowState, type HireFlowState } from "@/server/staffing";
 import { tools } from "@/server/tools";
 import type { ToolCategory, ToolSideEffect } from "@/server/tools/types";
+import { JOB_PERMISSION_KEYS, permissionSubset, type JobPermissions } from "./permissions";
 
 /**
  * Read side of /hire. Thin on purpose: the step, spec and proposal come straight from
@@ -25,6 +26,8 @@ export type HireView =
   | {
       kind: "flow";
       state: HireFlowState;
+      /** Scoping and approving a spec is jobs.manage; the final "Hire" is workers.hire. */
+      permissions: JobPermissions;
       /** Every registry tool keyed by name — small enough to ship whole, so unknown names never blank a row. */
       toolMeta: Record<string, ToolMeta>;
       familyLabel: string;
@@ -36,6 +39,7 @@ export type HireView =
       jobId: string;
       status: JobStatus;
       workerId: string | null;
+      permissions: JobPermissions;
     };
 
 export interface OpenHireJob {
@@ -70,11 +74,12 @@ function familyLabelOf(slug: string): string {
  * Flow state for the page, or a pointer to the worker when the job has already been staffed. Throws NOT_FOUND
  * for jobs outside the caller's organization (the page maps that to `notFound()`).
  */
-export async function getHireView(organizationId: string, jobId: string): Promise<HireView> {
+export async function getHireView(organizationId: string, jobId: string, opts: { role?: UserRole } = {}): Promise<HireView> {
+  const permissions = permissionSubset(opts.role, JOB_PERMISSION_KEYS);
   try {
     const state = await getHireFlowState(organizationId, jobId);
     const info = JOB_FAMILY_INFO[state.job.jobFamily];
-    return { kind: "flow", state, toolMeta: toolMetaMap(), familyLabel: info.label, familyDescription: info.description };
+    return { kind: "flow", state, permissions, toolMeta: toolMetaMap(), familyLabel: info.label, familyDescription: info.description };
   } catch (e) {
     if (!isAppError(e) || e.code !== "NOT_FOUND") throw e;
   }
@@ -89,7 +94,7 @@ export async function getHireView(organizationId: string, jobId: string): Promis
     },
   });
   if (!job) throw notFound("Job");
-  return { kind: "staffed", jobId: job.id, status: job.status, workerId: job.workers[0]?.id ?? null };
+  return { kind: "staffed", jobId: job.id, status: job.status, workerId: job.workers[0]?.id ?? null, permissions };
 }
 
 /** Unfinished hires, newest first, for "pick up where you left off" on the Describe step. */

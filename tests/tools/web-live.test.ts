@@ -211,10 +211,37 @@ Foo Ventures.</p><div><p>Second paragraph.</p></div>
     await assertion;
   });
 
-  it("the tool goes live for non-.example hosts when the context is live", async () => {
+  it("refuses a live host with no provenance in this run, and says how to get some", async () => {
+    // F-010: in live mode a host must come from this run's own search results or from the job text.
+    // The context here points at no real run, so nothing is allowed. (The allowed path is covered in
+    // tests/security/tool-provenance.test.ts, which sets up a real run.)
     vi.spyOn(transport, "fetch").mockImplementation(async () => page("<title>Live</title><p>hello</p>"));
-    // DNS is real here, so use an IP literal that is public to avoid resolution.
-    const result = await fetchUrlTool.execute({ url: "http://93.184.216.34/" }, makeCtx({ simulated: false }));
-    expect(result).toEqual({ output: { url: "http://93.184.216.34/", title: "Live", text: "hello" }, simulated: false });
+    await expect(fetchUrlTool.execute({ url: "http://93.184.216.34/" }, makeCtx({ simulated: false }))).rejects.toMatchObject({
+      code: "TOOL_ERROR",
+      message: expect.stringContaining("web_search"),
+    });
+  });
+
+  it("refuses a URL longer than 2,048 characters before touching the network", async () => {
+    const fetchSpy = vi.spyOn(transport, "fetch").mockImplementation(async () => page("<title>Live</title>"));
+    const long = `https://exfil.test/c?d=${"a".repeat(2_100)}`;
+    await expect(fetchUrlTool.execute({ url: long }, makeCtx({ simulated: false }))).rejects.toMatchObject({
+      code: "TOOL_ERROR",
+      message: expect.stringContaining("too long"),
+    });
+    await expect(fetchUrlLive(long, { lookup: publicLookup })).rejects.toMatchObject({ code: "TOOL_ERROR" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("strips the fragment before requesting the page", async () => {
+    let requested = "";
+    await fetchUrlLive("https://docs.test/page#section-two", {
+      fetch: async (url) => {
+        requested = String(url);
+        return page("<title>Doc</title><p>body</p>");
+      },
+      lookup: publicLookup,
+    });
+    expect(requested).toBe("https://docs.test/page");
   });
 });

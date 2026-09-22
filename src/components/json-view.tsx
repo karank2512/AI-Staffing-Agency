@@ -1,4 +1,4 @@
-import { Braces, ChevronRight } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { CopyButton } from "@/components/copy-button";
 import { describeJsonShape, safeStringify, tokenizeJson, type JsonTokenKind } from "@/lib/json-highlight";
 import { cn } from "@/lib/utils";
@@ -13,11 +13,12 @@ export interface JsonViewProps {
   className?: string;
 }
 
+/** Barely-there tinting: enough to find a key, not enough to look like a syntax-highlighter demo. */
 const TOKEN_CLASS: Record<JsonTokenKind, string | undefined> = {
-  key: "text-slate-900",
-  string: "text-emerald-700",
-  number: "text-sky-700",
-  literal: "text-violet-700",
+  key: "text-foreground",
+  string: "text-success",
+  number: "text-info",
+  literal: "text-muted-foreground",
   plain: undefined,
 };
 
@@ -35,23 +36,19 @@ export function JsonView({ value, label = "JSON", defaultOpen = false, className
   const shown = clipped ? text.slice(0, RENDER_LIMIT) : text;
 
   return (
-    <details
-      data-slot="json-view"
-      open={defaultOpen}
-      className={cn("group/json overflow-hidden rounded-lg border border-border bg-card", className)}
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2 py-1 pr-1 pl-3 text-xs font-medium text-muted-foreground select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3.5 shrink-0 transition-transform group-open/json:rotate-90" aria-hidden="true" />
-        <Braces className="size-3.5 shrink-0" aria-hidden="true" />
-        <span className="truncate text-foreground/80">{label}</span>
-        <span className="truncate font-mono text-[11px] font-normal text-muted-foreground/80">
-          {describeJsonShape(value)}
-        </span>
+    <details data-slot="json-view" open={defaultOpen} className={cn("group/json", className)}>
+      <summary className="flex cursor-pointer list-none items-center gap-2 py-1.5 text-footnote font-medium text-muted-foreground select-none hover:text-foreground [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="size-3.5 shrink-0 transition-transform duration-[240ms] ease-standard group-open/json:rotate-90"
+          aria-hidden="true"
+        />
+        <span className="truncate text-foreground">{label}</span>
+        <span className="truncate font-mono text-caption font-normal text-tertiary">{describeJsonShape(value)}</span>
         <span className="ml-auto flex shrink-0 items-center">
           <CopyButton value={text} />
         </span>
       </summary>
-      <pre className="max-h-[28rem] overflow-auto border-t border-border bg-slate-50 p-3 font-mono text-xs leading-5 text-slate-600">
+      <pre className="max-h-[28rem] overflow-auto rounded-lg bg-muted p-4 font-mono text-[13px] leading-5 text-muted-foreground">
         <code>
           {shown.length <= HIGHLIGHT_LIMIT
             ? tokenizeJson(shown).map((token, i) =>

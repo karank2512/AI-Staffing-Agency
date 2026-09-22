@@ -2,6 +2,7 @@ import type {
   MessageClassification,
   MessageRole,
   ToolCallStatus,
+  UserRole,
   VersionChangeReason,
   WorkerStatus,
   WorkerVersionStatus,
@@ -23,6 +24,7 @@ import { notFound } from "@/server/errors";
 import { tools } from "@/server/tools";
 import type { ToolCategory, ToolSideEffect } from "@/server/tools/types";
 import { getVersionComparison, listMessages, listVersions, type VersionSummary } from "@/server/workers";
+import { permissionSubset, WORKER_PERMISSION_KEYS, type WorkerPermissions } from "./permissions";
 
 /**
  * Read models for the "manage" side of a worker profile — Permissions, Talk to worker, Versions and Debug tabs —
@@ -105,9 +107,15 @@ export interface WorkerPermissionsView {
   /** Estimated cost per run from the current blueprint, for context next to the cost limit. */
   estimatedCostPerRunUsd: number | null;
   currentVersion: { id: string; version: number } | null;
+  /** Changing a grant or a schedule is workers.manage; the page disables the switches for everyone else. */
+  permissions: WorkerPermissions;
 }
 
-export async function getWorkerPermissions(organizationId: string, workerId: string): Promise<WorkerPermissionsView> {
+export async function getWorkerPermissions(
+  organizationId: string,
+  workerId: string,
+  opts: { role?: UserRole } = {},
+): Promise<WorkerPermissionsView> {
   const worker = await loadWorkerCore(organizationId, workerId);
   const blueprint = worker.currentVersion ? parseBlueprintOrNull(worker.currentVersion.blueprint) : null;
   const grants = await db.workerToolGrant.findMany({ where: { workerId: worker.id }, orderBy: { createdAt: "asc" } });
@@ -150,6 +158,7 @@ export async function getWorkerPermissions(organizationId: string, workerId: str
     limits: blueprint?.limits ?? null,
     estimatedCostPerRunUsd: blueprint?.costEstimate.perRunUsd ?? null,
     currentVersion: worker.currentVersion ? { id: worker.currentVersion.id, version: worker.currentVersion.version } : null,
+    permissions: permissionSubset(opts.role, WORKER_PERMISSION_KEYS),
   };
 }
 
@@ -175,6 +184,7 @@ export interface WorkerChatView {
   messages: ChatMessageView[];
   /** One-off instructions parked for the next run. */
   pendingInstructions: number;
+  permissions: WorkerPermissions;
 }
 
 function messageView(
@@ -199,7 +209,11 @@ function messageView(
   };
 }
 
-export async function getWorkerChat(organizationId: string, workerId: string): Promise<WorkerChatView> {
+export async function getWorkerChat(
+  organizationId: string,
+  workerId: string,
+  opts: { role?: UserRole } = {},
+): Promise<WorkerChatView> {
   const worker = await loadWorkerCore(organizationId, workerId);
   const [messages, pendingInstructions] = await Promise.all([
     listMessages(organizationId, worker.id, CHAT_HISTORY_LIMIT),
@@ -217,6 +231,7 @@ export async function getWorkerChat(organizationId: string, workerId: string): P
     worker: coreOf(worker),
     messages: messages.map((m) => messageView(m, proposalById)),
     pendingInstructions,
+    permissions: permissionSubset(opts.role, WORKER_PERMISSION_KEYS),
   };
 }
 
@@ -286,6 +301,7 @@ export interface WorkerVersionsView {
   versions: VersionListItem[];
   openProposal: { id: string; version: number; changeReason: VersionChangeReason; href: string } | null;
   canPropose: boolean;
+  permissions: WorkerPermissions;
 }
 
 function tierChips(blueprint: WorkerBlueprint): VersionTierChip[] {
@@ -322,7 +338,11 @@ function versionListItem(workerId: string, summary: VersionSummary, parentVersio
   };
 }
 
-export async function getWorkerVersions(organizationId: string, workerId: string): Promise<WorkerVersionsView> {
+export async function getWorkerVersions(
+  organizationId: string,
+  workerId: string,
+  opts: { role?: UserRole } = {},
+): Promise<WorkerVersionsView> {
   const worker = await loadWorkerCore(organizationId, workerId);
   const [summaries, lineage] = await Promise.all([
     listVersions(organizationId, worker.id),
@@ -336,6 +356,7 @@ export async function getWorkerVersions(organizationId: string, workerId: string
     versions,
     openProposal: open ? { id: open.id, version: open.version, changeReason: open.changeReason, href: replaceHref(worker.id, open.id) } : null,
     canPropose: worker.status !== "RETIRED" && worker.currentVersionId !== null,
+    permissions: permissionSubset(opts.role, WORKER_PERMISSION_KEYS),
   };
 }
 
@@ -542,6 +563,8 @@ export interface ReplacePageView {
   deltas: EstimatedDeltasView | null;
   /** Any part of the proposal came from the simulator (analysis or mock model). */
   simulated: boolean;
+  /** `canDecide` says the proposal is still open; this says the viewer is allowed to decide it. */
+  permissions: WorkerPermissions;
 }
 
 function kpiTarget(k: Kpi): string {
@@ -592,7 +615,12 @@ function pctChange(before: number, after: number): number | null {
  * The compare page for `/workers/[workerId]/replace/[versionId]`. The worker id in the URL must own the version —
  * a mismatch is treated like a missing page rather than silently showing another worker's proposal.
  */
-export async function getReplacePageData(organizationId: string, workerId: string, versionId: string): Promise<ReplacePageView> {
+export async function getReplacePageData(
+  organizationId: string,
+  workerId: string,
+  versionId: string,
+  opts: { role?: UserRole } = {},
+): Promise<ReplacePageView> {
   const comparison = await getVersionComparison(organizationId, versionId);
   if (comparison.worker.id !== workerId) throw notFound("Worker version");
   const worker = await db.worker.findFirst({ where: { id: workerId, organizationId }, select: { status: true } });
@@ -618,5 +646,6 @@ export async function getReplacePageData(organizationId: string, workerId: strin
     diff: comparison.diff.entries,
     deltas,
     simulated: analysis?.simulated ?? false,
+    permissions: permissionSubset(opts.role, WORKER_PERMISSION_KEYS),
   };
 }

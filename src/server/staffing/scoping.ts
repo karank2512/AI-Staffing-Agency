@@ -1,4 +1,5 @@
 import { recordActivity } from "@/server/activity";
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson } from "@/server/db";
 import {
@@ -13,6 +14,7 @@ import {
 } from "@/server/domain";
 import { AppError, conflict, invalid } from "@/server/errors";
 import { llm } from "@/server/models";
+import { assertOrgActive, assertWithinBudget } from "@/server/security";
 import { tools } from "@/server/tools";
 import { detectFamily } from "./family-cues";
 import { getJob, nextSpecVersion, parseIntake } from "./jobs";
@@ -29,6 +31,9 @@ const MIN_DESCRIPTION_CHARS = 10;
 const MAX_DESCRIPTION_CHARS = 5_000;
 
 export async function scopeJob(s: SessionContext, description: string): Promise<{ jobId: string; questions: ScopingQuestions }> {
+  assertCan(s, "jobs.manage");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const text = description.replace(/\r\n/g, "\n").trim();
   if (text.length < MIN_DESCRIPTION_CHARS) throw invalid("Describe the job in a sentence or two so it can be scoped.");
   if (text.length > MAX_DESCRIPTION_CHARS) throw invalid(`Keep the description under ${MAX_DESCRIPTION_CHARS.toLocaleString("en-US")} characters.`);
@@ -94,6 +99,9 @@ function mergeAnswers(intake: IntakeAnswers | null, answers: Record<string, stri
 }
 
 export async function buildJobSpec(s: SessionContext, jobId: string, answers: Record<string, string>): Promise<{ jobSpecId: string; spec: JobSpec }> {
+  assertCan(s, "jobs.manage");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const job = await getJob(s.organizationId, jobId);
   if (job.status !== "DRAFT") throw conflict("This job's spec is already approved. Revise it to make changes.");
 

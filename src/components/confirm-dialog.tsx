@@ -59,21 +59,20 @@ export function ConfirmDialog({ trigger, title, description, confirmLabel, destr
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription asChild>
-            <div className="text-sm text-pretty text-muted-foreground">{description}</div>
+            <div className="text-[15px] text-pretty text-muted-foreground">{description}</div>
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button type="button" variant="outline" disabled={pending} onClick={() => setOpen(false)}>
+          <Button type="button" variant="secondary" disabled={pending} onClick={() => setOpen(false)}>
             Cancel
           </Button>
+          {/* The final confirm is the one place a solid red pill is allowed — everywhere else danger is text. */}
           <Button
             type="button"
             disabled={pending}
             onClick={confirm}
             className={
-              destructive
-                ? "bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/30"
-                : undefined
+              destructive ? "bg-danger text-white hover:bg-danger/90 focus-visible:ring-danger/25" : undefined
             }
           >
             {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}

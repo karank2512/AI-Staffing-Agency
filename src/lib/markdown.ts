@@ -73,7 +73,36 @@ export function isExternalHref(href: string): boolean {
 
 const ESCAPABLE = /[\\`*_{}[\]()#+\-.!|~<>]/;
 const WORD_CHAR = /[\p{L}\p{N}]/u;
-const BARE_URL = /^https?:\/\/[^\s<>]+/i;
+
+/**
+ * Sticky (`y`) regexes matched AT an index instead of `exec(src.slice(i))`. Slicing inside the scan loop is
+ * what made the inline parser quadratic on long runs of spaces, backticks or `*` — 60 k spaces took 1.8 s
+ * (INF-17). Sticky matching allocates nothing.
+ */
+const HARD_BREAK_AT = / {2,}\n/y;
+const AUTOLINK_AT = /<((?:https?:\/\/|mailto:)[^\s<>]+)>/iy;
+const BARE_URL_AT = /https?:\/\/[^\s<>]+/iy;
+
+/**
+ * How far the inline scanner looks ahead for a closing delimiter or link bracket. Real emphasis and real
+ * link labels are short; without a bound, `"_a_a_a…"` or `"[[[[…"` makes every opener scan to the end of the
+ * document (quadratic). Past the window the delimiter is simply literal text.
+ */
+const MAX_SPAN = 2_000;
+/** Nested inline structures recurse; a crafted `[[[[…]]]]` must not exhaust the stack. */
+const MAX_INLINE_DEPTH = 24;
+
+function matchAt(re: RegExp, src: string, index: number): RegExpExecArray | null {
+  re.lastIndex = index;
+  return re.exec(src);
+}
+
+/** Length of the run of `ch` starting at `index`. */
+function runLength(src: string, index: number, ch: string): number {
+  let n = 0;
+  while (src[index + n] === ch) n += 1;
+  return n;
+}
 
 function pushText(out: InlineNode[], value: string): void {
   if (value === "") return;
@@ -82,17 +111,21 @@ function pushText(out: InlineNode[], value: string): void {
   else out.push({ type: "text", value });
 }
 
-/** Index of the closing `delim` after `from`, skipping escapes and code spans. -1 when there is none. */
+/**
+ * Index of the closing `delim` after `from`, skipping escapes and code spans. -1 when there is none within
+ * `MAX_SPAN` characters.
+ */
 function findClosing(src: string, from: number, delim: string): number {
+  const limit = Math.min(src.length, from + MAX_SPAN);
   let i = from;
-  while (i < src.length) {
+  while (i < limit) {
     const ch = src[i];
     if (ch === "\\") {
       i += 2;
       continue;
     }
     if (ch === "`") {
-      const run = /^`+/.exec(src.slice(i))?.[0].length ?? 1;
+      const run = runLength(src, i, "`") || 1;
       const close = src.indexOf("`".repeat(run), i + run);
       i = close === -1 ? i + run : close + run;
       continue;
@@ -122,9 +155,10 @@ function findClosing(src: string, from: number, delim: string): number {
 
 /** Matches `[label](target "title")` at `start` (which points at `[`). */
 function matchLink(src: string, start: number): { label: string; target: string; end: number } | null {
+  const labelLimit = Math.min(src.length, start + MAX_SPAN);
   let depth = 0;
   let i = start;
-  for (; i < src.length; i++) {
+  for (; i < labelLimit; i++) {
     const ch = src[i];
     if (ch === "\\") {
       i += 1;
@@ -136,10 +170,11 @@ function matchLink(src: string, start: number): { label: string; target: string;
       if (depth === 0) break;
     }
   }
-  if (i >= src.length || src[i + 1] !== "(") return null;
+  if (i >= labelLimit || src[i + 1] !== "(") return null;
+  const targetLimit = Math.min(src.length, i + MAX_SPAN);
   let parens = 0;
   let j = i + 1;
-  for (; j < src.length; j++) {
+  for (; j < targetLimit; j++) {
     const ch = src[j];
     if (ch === "\\") {
       j += 1;
@@ -152,7 +187,7 @@ function matchLink(src: string, start: number): { label: string; target: string;
       if (parens === 0) break;
     }
   }
-  if (j >= src.length) return null;
+  if (j >= targetLimit) return null;
   const inside = src.slice(i + 2, j).trim();
   // Drop an optional title: [x](https://a.example "Title")
   const target = inside.replace(/\s+("[^"]*"|'[^']*')\s*$/, "").replace(/^<(.*)>$/, "$1");
@@ -174,8 +209,9 @@ function emphasisCanClose(src: string, closeIdx: number, delim: string): boolean
   return true;
 }
 
-export function parseInline(src: string): InlineNode[] {
+export function parseInline(src: string, depth = 0): InlineNode[] {
   const out: InlineNode[] = [];
+  if (depth > MAX_INLINE_DEPTH) return src === "" ? out : [{ type: "text", value: src }];
   let i = 0;
 
   while (i < src.length) {
@@ -201,17 +237,22 @@ export function parseInline(src: string): InlineNode[] {
 
     // Hard break: two+ trailing spaces before a newline
     if (ch === " " && src[i + 1] === " ") {
-      const hard = /^ {2,}\n/.exec(src.slice(i));
+      const hard = matchAt(HARD_BREAK_AT, src, i);
       if (hard) {
         out.push({ type: "br" });
         i += hard[0].length;
         continue;
       }
+      // Not a break: emit the whole space run so its tail is not re-tested character by character.
+      const spaces = runLength(src, i, " ");
+      pushText(out, " ".repeat(spaces));
+      i += spaces;
+      continue;
     }
 
     // Code span
     if (ch === "`") {
-      const run = /^`+/.exec(src.slice(i))?.[0].length ?? 1;
+      const run = runLength(src, i, "`") || 1;
       const close = src.indexOf("`".repeat(run), i + run);
       if (close !== -1) {
         const value = src.slice(i + run, close).replace(/\n/g, " ");
@@ -234,7 +275,7 @@ export function parseInline(src: string): InlineNode[] {
         if (!src.startsWith(delim, i) || !emphasisCanOpen(src, i, delim)) continue;
         const close = findClosing(src, i + delim.length, delim);
         if (close === -1 || close === i + delim.length || !emphasisCanClose(src, close, delim)) continue;
-        const inner = parseInline(src.slice(i + delim.length, close));
+        const inner = parseInline(src.slice(i + delim.length, close), depth + 1);
         if (delim === "~~") out.push({ type: "del", children: inner });
         else if (delim.length === 3) out.push({ type: "strong", children: [{ type: "em", children: inner }] });
         else if (delim.length === 2) out.push({ type: "strong", children: inner });
@@ -245,9 +286,9 @@ export function parseInline(src: string): InlineNode[] {
       }
       if (matched) continue;
       // Not emphasis: emit the whole delimiter run literally so its tail is not re-tried as an opener.
-      const run = new RegExp(`^\\${ch}+`).exec(src.slice(i))?.[0] ?? ch;
-      pushText(out, run);
-      i += run.length;
+      const run = runLength(src, i, ch) || 1;
+      pushText(out, ch.repeat(run));
+      i += run;
       continue;
     }
 
@@ -257,7 +298,7 @@ export function parseInline(src: string): InlineNode[] {
       const link = matchLink(src, start);
       if (link) {
         const href = sanitizeHref(link.target);
-        const children = parseInline(link.label);
+        const children = parseInline(link.label, depth + 1);
         if (href) out.push({ type: "link", href, children: children.length > 0 ? children : [{ type: "text", value: href }] });
         else out.push(...children);
         i = link.end;
@@ -267,7 +308,7 @@ export function parseInline(src: string): InlineNode[] {
 
     // Autolink <https://…> — any other <…> is literal text (no raw HTML).
     if (ch === "<") {
-      const auto = /^<((?:https?:\/\/|mailto:)[^\s<>]+)>/i.exec(src.slice(i));
+      const auto = matchAt(AUTOLINK_AT, src, i);
       const href = auto?.[1] ? sanitizeHref(auto[1]) : null;
       if (auto && href) {
         out.push({ type: "link", href, children: [{ type: "text", value: auto[1] as string }] });
@@ -278,7 +319,7 @@ export function parseInline(src: string): InlineNode[] {
 
     // Bare URL
     if ((ch === "h" || ch === "H") && (i === 0 || !WORD_CHAR.test(src[i - 1] ?? ""))) {
-      const bare = BARE_URL.exec(src.slice(i));
+      const bare = matchAt(BARE_URL_AT, src, i);
       if (bare) {
         let url = bare[0].replace(/[.,;:!?'"*_~]+$/, "");
         // A trailing ")" belongs to the sentence unless the URL itself opened a parenthesis.
@@ -321,15 +362,89 @@ export function inlineToText(nodes: InlineNode[]): string {
 // ── Blocks ──────────────────────────────────────────────────────────────────
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/;
-const HEADING = /^ {0,3}(#{1,6})(?:\s+(.*?))?(?:\s+#+)?\s*$/;
+/**
+ * Applied to `line.trimEnd()`, with the optional closing `###` run stripped afterwards by
+ * `stripClosingHashes`. The CommonMark-shaped `(?:\s+(.*?))?(?:\s+#+)?\s*$` spelling backtracks in
+ * quadratic time on a long whitespace run, which is untrusted model/web text on the SSR event loop (INF-17).
+ */
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/;
 const HR = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const BLOCKQUOTE = /^ {0,3}>\s?/;
 const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])(\s+)(.*)$/;
-const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 const TASK = /^\[([ xX])\]\s+/;
+
+/**
+ * Block openers are only looked for on lines of a sane length. A 100 KB single line is never a heading, a
+ * rule or a table delimiter, and scanning it repeatedly is exactly the stall INF-17 describes — it becomes
+ * paragraph text instead.
+ */
+const MAX_BLOCK_LINE_CHARS = 2_000;
+const tooLongForBlockScan = (line: string): boolean => line.length > MAX_BLOCK_LINE_CHARS;
+
+/** Longest document this parser will render; the rest is dropped with a visible notice. */
+export const MAX_MARKDOWN_CHARS = 200_000;
+const TRUNCATION_NOTICE = "*[This document is too long to display in full. The rest was left out.]*";
 
 const isBlank = (line: string | undefined): boolean => line === undefined || line.trim() === "";
 const indentOf = (line: string): number => /^\s*/.exec(line)?.[0].length ?? 0;
+
+/** `## Title ##` → `Title`. Hand-written: the regex form (`\s+#+\s*$`) is quadratic on whitespace runs. */
+function stripClosingHashes(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "#") end -= 1;
+  if (end === text.length) return text; // no trailing hashes
+  if (end === 0) return ""; // the text IS the closing sequence ("## ###")
+  let start = end;
+  while (start > 0 && (text[start - 1] === " " || text[start - 1] === "\t")) start -= 1;
+  return start === end ? text : text.slice(0, start);
+}
+
+export interface HeadingMatch {
+  level: 1 | 2 | 3 | 4 | 5 | 6;
+  text: string;
+}
+
+function matchHeading(line: string): HeadingMatch | null {
+  if (tooLongForBlockScan(line)) return null;
+  const match = HEADING.exec(line.trimEnd());
+  if (!match) return null;
+  return { level: (match[1] as string).length as HeadingMatch["level"], text: stripClosingHashes(match[2] ?? "").trim() };
+}
+
+/**
+ * `| --- | :--: |` — a GFM table delimiter row. A hand-written scan: every regex spelling of this row has
+ * adjacent `\s*` quantifiers and backtracks quadratically on whitespace (INF-17). Linear and allocation-free
+ * apart from the trim.
+ *
+ * @param minDashes minimum `-` per cell (Markdown allows one; the plain-text previewer wants two).
+ */
+export function isTableDelimiterRow(line: string, minDashes = 1): boolean {
+  if (tooLongForBlockScan(line)) return false;
+  const s = line.trim();
+  if (s === "") return false;
+  let i = s[0] === "|" ? 1 : 0;
+  let cells = 0;
+  const skipSpaces = () => {
+    while (i < s.length && (s[i] === " " || s[i] === "\t")) i += 1;
+  };
+  while (i < s.length) {
+    skipSpaces();
+    if (s[i] === ":") i += 1;
+    let dashes = 0;
+    while (i < s.length && s[i] === "-") {
+      i += 1;
+      dashes += 1;
+    }
+    if (dashes < minDashes) return false;
+    if (s[i] === ":") i += 1;
+    skipSpaces();
+    cells += 1;
+    if (i >= s.length) break;
+    if (s[i] !== "|") return false;
+    i += 1;
+  }
+  return cells > 0;
+}
 
 /** Split a table row on unescaped pipes; outer pipes are optional. */
 export function splitTableRow(line: string): string[] {
@@ -358,15 +473,17 @@ function isTableStart(lines: string[], i: number): boolean {
   const header = lines[i];
   const delimiter = lines[i + 1];
   if (header === undefined || delimiter === undefined) return false;
-  if (!header.includes("|") || !delimiter.includes("-") || !TABLE_DELIMITER.test(delimiter)) return false;
+  if (tooLongForBlockScan(header)) return false;
+  if (!header.includes("|") || !delimiter.includes("-") || !isTableDelimiterRow(delimiter)) return false;
   return splitTableRow(header).length === splitTableRow(delimiter).length;
 }
 
 function startsNewBlock(lines: string[], i: number): boolean {
   const line = lines[i] as string;
+  if (tooLongForBlockScan(line)) return false;
   return (
     FENCE.test(line) ||
-    HEADING.test(line) ||
+    matchHeading(line) !== null ||
     HR.test(line) ||
     BLOCKQUOTE.test(line) ||
     LIST_ITEM.test(line) ||
@@ -479,6 +596,13 @@ function parseBlocks(lines: string[]): BlockNode[] {
       continue;
     }
 
+    if (tooLongForBlockScan(line)) {
+      // One very long line is paragraph text, whatever it starts with.
+      blocks.push({ type: "paragraph", children: parseInline(line.trimEnd()) });
+      i += 1;
+      continue;
+    }
+
     const fence = FENCE.exec(line);
     if (fence) {
       const marker = fence[1] as string;
@@ -500,10 +624,9 @@ function parseBlocks(lines: string[]): BlockNode[] {
       continue;
     }
 
-    const heading = HEADING.exec(line);
+    const heading = matchHeading(line);
     if (heading) {
-      const level = (heading[1] as string).length as 1 | 2 | 3 | 4 | 5 | 6;
-      blocks.push({ type: "heading", level, children: parseInline((heading[2] ?? "").trim()) });
+      blocks.push({ type: "heading", level: heading.level, children: parseInline(heading.text) });
       i += 1;
       continue;
     }
@@ -545,9 +668,15 @@ function parseBlocks(lines: string[]): BlockNode[] {
   return blocks;
 }
 
-/** Parse a Markdown document. Never throws; `null` / `undefined` / empty input yields `[]`. */
+/**
+ * Parse a Markdown document. Never throws; `null` / `undefined` / empty input yields `[]`. Input longer than
+ * `MAX_MARKDOWN_CHARS` is cut at that point and a notice is appended — deliverables and chat replies are
+ * model output, so "how long can this be" is not our call to leave open.
+ */
 export function parseMarkdown(source: string | null | undefined): BlockNode[] {
   if (!source) return [];
-  const lines = source.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
+  const capped =
+    source.length > MAX_MARKDOWN_CHARS ? `${source.slice(0, MAX_MARKDOWN_CHARS)}\n\n${TRUNCATION_NOTICE}` : source;
+  const lines = capped.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n");
   return parseBlocks(lines);
 }

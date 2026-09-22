@@ -1,4 +1,6 @@
 import { db, toJson } from "@/server/db";
+import { errorMessage } from "@/server/errors";
+import { securityLog } from "@/server/security";
 import { recordUsage } from "@/server/usage";
 import type { CallTracking, ChatMessage, GenerateTextResult, ModelTier, ModelUsage, ProviderId, ToolCallRequest } from "./types";
 
@@ -106,7 +108,9 @@ export async function recordModelCall(record: ModelCallRecord): Promise<string |
     return await persistModelCall(record);
   } catch (e) {
     // Belt and braces (e.g. a caller bypassed the types and sent no tracking): tracing must never fail the call.
-    console.error("[models] Failed to record model call", e);
+    // INF-20: the error's TEXT, scrubbed and clipped — never the error object, whose Prisma metadata can
+    // carry row values (prompts, tenant data).
+    securityLog("error", "models.record_failed", { error: errorMessage(e) });
     return undefined;
   }
 }
@@ -141,7 +145,7 @@ async function persistModelCall(record: ModelCallRecord): Promise<string | undef
     });
     modelCallId = row.id;
   } catch (e) {
-    console.error(`[models] Failed to persist ModelCall (${tracking.purpose})`, e);
+    securityLog("error", "models.model_call_not_persisted", { purpose: tracking.purpose, error: errorMessage(e) });
   }
 
   // A failed call is only metered when the provider actually consumed tokens (e.g. two invalid structured outputs).
@@ -163,7 +167,7 @@ async function persistModelCall(record: ModelCallRecord): Promise<string | undef
       });
     } catch (e) {
       // recordUsage promises not to throw; this guard keeps OUR promise even if that contract is ever broken.
-      console.error(`[models] Failed to record usage (${tracking.purpose})`, e);
+      securityLog("error", "models.usage_not_recorded", { purpose: tracking.purpose, error: errorMessage(e) });
     }
   }
 

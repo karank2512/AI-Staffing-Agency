@@ -10,6 +10,7 @@ import {
   type WorkerBlueprint,
 } from "@/server/domain";
 import { AppError } from "@/server/errors";
+import { clampRunLimits } from "@/server/security";
 import { tools } from "@/server/tools";
 import { estimateCost } from "./cost";
 import { extractEmails, looksNumeric, specText } from "./cues";
@@ -347,8 +348,10 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
     evaluation: deriveEvaluationPlan(spec, { keyFields }),
     deliverable: { titleTemplate: `${spec.deliverable.title} — {{date}}`, format, contentKey, dataKey: "records" },
     schedule: spec.cadence,
-    // The same ceiling the cost KPI and the max_cost_usd check use (kpis.ts), so the three never disagree.
-    limits: { ...DEFAULT_RUN_LIMITS, maxCostPerRunUsd: maxCostPerRun(spec) },
+    // The same ceiling the cost KPI and the max_cost_usd check use (kpis.ts), so the three never disagree —
+    // then clamped to the platform maximums, so a "$100,000 per run" budget in the description cannot escape
+    // into a blueprint (audit INF-04). The runtime clamps again at check time.
+    limits: clampRunLimits({ ...DEFAULT_RUN_LIMITS, maxCostPerRunUsd: maxCostPerRun(spec) }),
   };
   const candidate: WorkerBlueprint = { ...withoutCost, costEstimate: estimateCost(withoutCost) };
 

@@ -5,6 +5,7 @@ import type {
   JobSpecStatus,
   RunStatus,
   RunTrigger,
+  UserRole,
   WorkerHealth,
   WorkerStatus,
 } from "@prisma/client";
@@ -19,6 +20,7 @@ import {
   type JobSpec,
 } from "@/server/domain";
 import { notFound } from "@/server/errors";
+import { JOB_PERMISSION_KEYS, permissionSubset, type JobPermissions } from "./permissions";
 
 /**
  * Read models for /jobs and /jobs/[jobId]. Everything is org-scoped and plain JSON (Decimal → Number,
@@ -84,9 +86,14 @@ export interface JobsListView {
   filter: JobStatus | null;
   counts: Record<JobStatus | "all", number>;
   hasRunsInFlight: boolean;
+  /** Scoping, closing and discarding jobs is jobs.manage; hiring is workers.hire. */
+  permissions: JobPermissions;
 }
 
-export async function listJobs(organizationId: string, opts: { status?: JobStatus | null } = {}): Promise<JobsListView> {
+export async function listJobs(
+  organizationId: string,
+  opts: { status?: JobStatus | null; role?: UserRole } = {},
+): Promise<JobsListView> {
   const filter = opts.status ?? null;
   const [rows, grouped, inFlight] = await Promise.all([
     db.job.findMany({
@@ -134,7 +141,7 @@ export async function listJobs(organizationId: string, opts: { status?: JobStatu
     };
   });
 
-  return { jobs, filter, counts, hasRunsInFlight: inFlight > 0 };
+  return { jobs, filter, counts, hasRunsInFlight: inFlight > 0, permissions: permissionSubset(opts.role, JOB_PERMISSION_KEYS) };
 }
 
 // ── /jobs/[jobId] ───────────────────────────────────────────────────────────
@@ -216,9 +223,15 @@ export interface JobDetailView {
     discard: boolean;
   };
   hasRunsInFlight: boolean;
+  /** `can` describes the job's state; `permissions` describes the viewer. A control needs both. */
+  permissions: JobPermissions;
 }
 
-export async function getJobDetail(organizationId: string, jobId: string): Promise<JobDetailView> {
+export async function getJobDetail(
+  organizationId: string,
+  jobId: string,
+  opts: { role?: UserRole } = {},
+): Promise<JobDetailView> {
   const job = await db.job.findFirst({
     where: { id: jobId, organizationId },
     include: {
@@ -345,5 +358,6 @@ export async function getJobDetail(organizationId: string, jobId: string): Promi
       discard: (job.status === "DRAFT" || job.status === "SPEC_APPROVED") && job.workers.length === 0,
     },
     hasRunsInFlight: runs.some((r) => IN_FLIGHT.includes(r.status)),
+    permissions: permissionSubset(opts.role, JOB_PERMISSION_KEYS),
   };
 }

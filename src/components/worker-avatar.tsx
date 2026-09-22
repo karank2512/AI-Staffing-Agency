@@ -4,24 +4,29 @@ import { cn } from "@/lib/utils";
 
 /**
  * FULL static class strings — Tailwind only generates classes it can see verbatim in source, so never build
- * these with template strings. Typed by `AvatarColor` (type-only import) so adding a token to
- * `AVATAR_COLORS` in the domain fails the build until it has classes here.
+ * these with template strings. Typed by `AvatarColor` (type-only import) so adding a token to `AVATAR_COLORS`
+ * in the domain fails the build until it has classes here.
+ *
+ * Every entry is a pastel fill (~94% lightness) with same-hue initials at ~40% lightness: readable, never
+ * saturated, never a gradient.
  */
 const AVATAR_COLOR_CLASSES: Record<AvatarColor, string> = {
-  violet: "bg-violet-100 text-violet-700 ring-violet-200",
-  sky: "bg-sky-100 text-sky-700 ring-sky-200",
-  emerald: "bg-emerald-100 text-emerald-700 ring-emerald-200",
-  amber: "bg-amber-100 text-amber-800 ring-amber-200",
-  rose: "bg-rose-100 text-rose-700 ring-rose-200",
-  indigo: "bg-indigo-100 text-indigo-700 ring-indigo-200",
-  teal: "bg-teal-100 text-teal-700 ring-teal-200",
-  orange: "bg-orange-100 text-orange-700 ring-orange-200",
+  violet: "bg-violet-100 text-violet-700",
+  sky: "bg-sky-100 text-sky-700",
+  emerald: "bg-emerald-100 text-emerald-700",
+  amber: "bg-amber-100 text-amber-800",
+  rose: "bg-rose-100 text-rose-700",
+  indigo: "bg-indigo-100 text-indigo-700",
+  teal: "bg-teal-100 text-teal-700",
+  orange: "bg-orange-100 text-orange-700",
 };
 
 const SIZE_CLASSES = {
-  sm: "size-6 text-[10px]",
-  md: "size-9 text-xs",
-  lg: "size-14 text-lg",
+  xs: "size-6 text-[10px]",
+  sm: "size-8 text-xs",
+  md: "size-10 text-sm",
+  lg: "size-12 text-base",
+  xl: "size-18 text-2xl",
 } as const;
 
 const FALLBACK_COLOR: AvatarColor = "violet";
@@ -35,8 +40,8 @@ export interface WorkerAvatarProps {
   name: string;
   /** `Worker.avatarColor` — one of the domain `AVATAR_COLORS` tokens. Unknown values fall back to violet. */
   color: string;
-  /** sm = 24px (table rows, feeds) · md = 36px (cards, default) · lg = 56px (profile header). */
-  size?: "sm" | "md" | "lg";
+  /** xs 24px (dense rows) · sm 32px · md 40px (default) · lg 48px (cards) · xl 72px (profile, résumé). */
+  size?: "xs" | "sm" | "md" | "lg" | "xl";
   className?: string;
 }
 
@@ -49,7 +54,7 @@ export function WorkerAvatar({ name, color, size = "md", className }: WorkerAvat
       role="img"
       aria-label={name}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full font-semibold tracking-tight ring-1 select-none ring-inset",
+        "inline-flex shrink-0 items-center justify-center rounded-full font-semibold tracking-tight select-none",
         SIZE_CLASSES[size],
         tint,
         className,

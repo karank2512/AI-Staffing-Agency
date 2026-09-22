@@ -1,0 +1,7 @@
+{
+  "migrations": [
+    "20260917192808_init",
+    "20260917210000_contract_review_fixes",
+    "20260922090000_production_security"
+  ]
+}

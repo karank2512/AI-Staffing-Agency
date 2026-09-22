@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { BriefcaseBusiness } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SESSION_EXPIRED_PARAM, getSession, safeCallbackUrl } from "@/server/auth";
+import { SESSION_EXPIRED_PARAM, SIGN_UP_PATH, getSession, safeCallbackUrl } from "@/server/auth";
 import { DEMO_USER } from "@/server/auth/types";
+import { config } from "@/server/config";
 import { SIGN_IN_MESSAGES } from "../schema";
 import { SignInForm } from "./sign-in-form";
 
@@ -32,6 +34,11 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
         ? SIGN_IN_MESSAGES.invalidCredentials
         : SIGN_IN_MESSAGES.unexpected;
 
+  // Demo credentials are printed on the page ONLY for a deployment that opted in (DEMO_MODE=true).
+  // Anywhere else the fields start empty and nothing hints at a shared account.
+  const demoMode = config.auth.demoMode;
+  const signUpOpen = config.auth.signupMode !== "closed";
+
   return (
     <div className="flex flex-col gap-8">
       <header className="flex flex-col items-center gap-3 text-center">
@@ -53,8 +60,9 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
         </CardHeader>
         <CardContent>
           <SignInForm
-            defaultEmail={DEMO_USER.email}
-            defaultPassword={DEMO_USER.password}
+            defaultEmail={demoMode ? DEMO_USER.email : ""}
+            defaultPassword={demoMode ? DEMO_USER.password : ""}
+            demoMode={demoMode}
             callbackUrl={callbackUrl}
             sessionExpired={sessionExpired}
             initialError={initialError}
@@ -62,10 +70,21 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
         </CardContent>
       </Card>
 
-      <p className="text-center text-xs text-balance text-muted-foreground">
-        You&apos;re signing in to the {DEMO_USER.organizationName} demo workspace. The credentials are pre-filled —
-        nothing to remember.
-      </p>
+      {signUpOpen ? (
+        <p className="text-center text-sm text-muted-foreground">
+          No workspace yet?{" "}
+          <Link href={SIGN_UP_PATH} className="font-medium text-foreground underline underline-offset-4">
+            Create one
+          </Link>
+        </p>
+      ) : null}
+
+      {demoMode ? (
+        <p className="text-center text-xs text-balance text-muted-foreground">
+          You&apos;re signing in to the {DEMO_USER.organizationName} demo workspace. The credentials are pre-filled —
+          nothing to remember.
+        </p>
+      ) : null}
     </div>
   );
 }

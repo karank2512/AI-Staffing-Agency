@@ -1,3 +1,4 @@
+import { assertCan } from "@/server/auth/permissions";
 import type { SessionContext } from "@/server/auth/types";
 import { db } from "@/server/db";
 import {
@@ -14,6 +15,8 @@ import {
 import { conflict, errorMessage } from "@/server/errors";
 import { llm } from "@/server/models";
 import { enqueueRun } from "@/server/runtime";
+import { assertOrgActive, assertWithinBudget } from "@/server/security";
+import { assertHeadcount } from "@/server/staffing";
 import { activateVersion } from "./activate";
 import { gatherEvidence, type ReplacementEvidence } from "./replace-evidence";
 import { mockReplacementPlan } from "./replace-mock";
@@ -139,6 +142,9 @@ export function buildAnalysis(plan: ReplacementPlan, evidence: ReplacementEviden
 }
 
 export async function proposeReplacement(s: SessionContext, workerId: string): Promise<{ versionId: string }> {
+  assertCan(s, "workers.manage");
+  await assertOrgActive(s.organizationId);
+  await assertWithinBudget(s.organizationId);
   const worker = await loadWorker(s.organizationId, workerId);
   if (worker.status === "RETIRED") throw conflict(`${worker.name} is retired; hire a new worker for this job instead`);
   const version = worker.currentVersion;
@@ -190,13 +196,21 @@ export async function hireReplacement(
   versionId: string,
   opts: { newName?: string; startFirstRun?: boolean } = {},
 ): Promise<{ runId?: string }> {
-  await activateVersion(s, versionId, { newName: opts.newName });
-  if (opts.startFirstRun === false) return {};
+  assertCan(s, "workers.hire");
+  await assertOrgActive(s.organizationId);
+  const seat = await db.workerVersion.findFirst({
+    where: { id: versionId, worker: { organizationId: s.organizationId } },
+    select: { workerId: true },
+  });
+  // The seat this replacement takes over is already on the roster, so it is excluded from the headcount cap:
+  // an org sitting exactly at its limit must still be able to replace a worker (audit F-004).
+  await assertHeadcount(s.organizationId, seat ? { excludeWorkerId: seat.workerId } : {});
 
-  const version = await db.workerVersion.findFirst({ where: { id: versionId, worker: { organizationId: s.organizationId } }, select: { workerId: true } });
-  if (!version) return {};
+  await activateVersion(s, versionId, { newName: opts.newName });
+  if (opts.startFirstRun === false || !seat) return {};
+
   try {
-    const { runId } = await enqueueRun({ organizationId: s.organizationId, workerId: version.workerId, trigger: "HIRE", requestedById: s.userId });
+    const { runId } = await enqueueRun({ organizationId: s.organizationId, workerId: seat.workerId, trigger: "HIRE", requestedById: s.userId });
     return { runId };
   } catch (e) {
     // The replacement is hired either way (a paused worker, for instance, cannot take a run yet).

@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck · lint · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ai_staffing_agency_test
+          TZ: UTC
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      # Must contain "_test": tests/setup/global-setup.ts refuses any other database.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ai_staffing_agency_test?schema=public&options=-c%20TimeZone%3DUTC
+      SHADOW_DATABASE_URL: postgresql://ci:ci@localhost:5432/ai_staffing_agency_shadow?schema=public
+      AUTH_SECRET: ci-only-secret-0123456789abcdef0123456789abcdef
+      AUTH_URL: http://localhost:3000
+      AUTH_TRUST_HOST: "true"
+      # Throwaway 32-byte key; the vault suites need a valid one. Never used outside CI.
+      CREDENTIAL_ENCRYPTION_KEY: dGVzdC1vbmx5LWtleS1kby1ub3QtdXNlLWluLXByb2Q=
+      EXECUTOR_MODE: "off"
+      FORCE_SIMULATED: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+      TZ: UTC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` runs `prisma generate` via postinstall.
+      - run: npm ci
+
+      - name: Apply migrations to the test database
+        run: npx prisma migrate deploy
+
+      - name: Fail if schema.prisma has drifted from prisma/migrations
+        run: |
+          PGPASSWORD=ci createdb -h localhost -U ci ai_staffing_agency_shadow
+          npx prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code
+
+      - name: Fail if the migration manifest is stale
+        run: |
+          npm run migrations:manifest
+          git diff --exit-code -- src/generated/migrations.json
+
+      - run: npx tsc --noEmit -p .
+
+      - run: npx eslint .
+
+      - run: npx vitest run
+
+      - name: Cache the Next.js build
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: next-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**/*.[jt]s', 'src/**/*.[jt]sx') }}
+          restore-keys: |
+            next-${{ hashFiles('package-lock.json') }}-
+
+      - name: Build the web app
+        run: npm run build
+        env:
+          NODE_ENV: production
+          APP_VERSION: ${{ github.sha }}
+
+      - name: Build the worker bundle
+        run: npm run build:worker
+
+      - name: Audit production dependencies
+        run: npm run audit:prod
+
+  image:
+    name: docker image
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build only: publishing is deliberately left to the deploy workflow that owns the registry credentials.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner
+          push: false
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

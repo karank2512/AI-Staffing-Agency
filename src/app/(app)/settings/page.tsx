@@ -11,8 +11,8 @@ export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
   const s = await requireSession();
-  const settings = await getSettingsPage(s.organizationId);
-  const canManage = s.role !== "MEMBER";
+  const settings = await getSettingsPage(s.organizationId, { role: s.role });
+  const canManage = settings.permissions["credentials.manage"];
   const simulatedMode = settings.providers.mode === "simulated";
 
   return (
@@ -27,7 +27,8 @@ export default async function SettingsPage() {
         <ProvidersCard providers={settings.providers} />
         <CredentialsCard credentials={settings.credentials} simulatedMode={simulatedMode} canManage={canManage} />
         <div className="grid gap-6 lg:grid-cols-2">
-          <ExecutorCard executor={settings.executor} />
+          {/* Executor tuning is platform-operator config: owners only (audit INF-19). */}
+          {settings.operator ? <ExecutorCard executor={settings.operator.executor} /> : null}
           <DemoDataCard />
         </div>
       </div>

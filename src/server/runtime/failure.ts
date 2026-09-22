@@ -1,4 +1,6 @@
 import { errorMessage, isAppError, type AppErrorCode } from "@/server/errors";
+import { redactSecrets } from "@/server/security";
+import { oneLine } from "./compact";
 
 /**
  * Executor control flow.
@@ -40,6 +42,18 @@ export class RunCancelled extends Error {
 }
 
 export const WORKER_RETIRED_REASON = "Cancelled because the worker was retired";
+
+/** Run.error and the ERROR step are shown to every member of the org. */
+export const RUN_ERROR_MAX_CHARS = 500;
+
+/**
+ * The only text of a failure that reaches the UI (audit F-009): one line, ≤ 500 characters, with anything that
+ * looks like a provider key, bearer token or long opaque secret replaced by `[redacted]`. The untruncated
+ * message still goes to the server log, where only the operator can read it.
+ */
+export function publicRunError(message: string): string {
+  return oneLine(redactSecrets(message), RUN_ERROR_MAX_CHARS);
+}
 
 /** Errors whose cause is the run's own definition or a hard rule: retrying would only repeat them. */
 const NON_RETRYABLE: ReadonlySet<AppErrorCode> = new Set<AppErrorCode>([

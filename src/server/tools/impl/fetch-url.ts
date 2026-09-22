@@ -4,11 +4,17 @@ import { simulation } from "@/server/simulation";
 import { defineTool, quote } from "../define";
 import { transport, type FetchLike } from "../guarded-http";
 import { checkUrl, checkUrlSyntax, type LookupFn } from "../net-guard";
+import { assertFetchAllowed } from "../provenance";
 import type { ToolOutput } from "../schemas";
 
 export const FETCH_TIMEOUT_MS = 10_000;
 export const MAX_BODY_BYTES = 200 * 1024;
 export const MAX_TEXT_CHARS = 12_000;
+/**
+ * A URL is model output, and a long one is a data channel, not an address (F-010). 2,048 is the practical
+ * browser/server limit; nothing legitimate the worker reads needs more.
+ */
+export const MAX_URL_CHARS = 2_048;
 const MAX_REDIRECTS = 3;
 const USER_AGENT = "AIStaffingAgency/0.1 (+research worker; reads public pages)";
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -109,6 +115,20 @@ function fallbackTitle(url: URL): string {
   return `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`;
 }
 
+function assertUrlLength(raw: string): void {
+  if (raw.length > MAX_URL_CHARS) {
+    throw new AppError("TOOL_ERROR", `That URL is too long (${raw.length} characters, max ${MAX_URL_CHARS}).`);
+  }
+}
+
+/** The fragment never reaches the server, so sending it is pointless — and it is one more place to hide data. */
+function stripFragment(url: URL): URL {
+  if (url.hash === "") return url;
+  const clean = new URL(url.toString());
+  clean.hash = "";
+  return clean;
+}
+
 async function request(url: URL, deps: FetchDeps, signal: AbortSignal): Promise<Response> {
   try {
     return await deps.fetch(url.toString(), {
@@ -134,6 +154,7 @@ async function request(url: URL, deps: FetchDeps, signal: AbortSignal): Promise<
  * stream the body up to the cap → convert to text by content type. Throws AppError("TOOL_ERROR") on any problem.
  */
 export async function fetchUrlLive(raw: string, deps: Partial<FetchDeps> = {}): Promise<ToolOutput<"fetch_url">> {
+  assertUrlLength(raw);
   const lookup = deps.lookup;
   const resolved: FetchDeps = { fetch: deps.fetch ?? ((url, init) => transport.fetch(url, init, { lookup })), lookup };
   const controller = new AbortController();
@@ -141,7 +162,7 @@ export async function fetchUrlLive(raw: string, deps: Partial<FetchDeps> = {}): 
   try {
     let check = await checkUrl(raw, { lookup: resolved.lookup });
     if (!check.ok) throw new AppError("TOOL_ERROR", check.reason);
-    let url = check.url;
+    let url = stripFragment(check.url);
     let response = await request(url, resolved, controller.signal);
 
     for (let hop = 0; REDIRECT_STATUSES.has(response.status); hop++) {
@@ -157,7 +178,7 @@ export async function fetchUrlLive(raw: string, deps: Partial<FetchDeps> = {}): 
       }
       check = await checkUrl(next, { lookup: resolved.lookup });
       if (!check.ok) throw new AppError("TOOL_ERROR", `Redirect blocked: ${check.reason}`);
-      url = check.url;
+      url = stripFragment(check.url);
       response = await request(url, resolved, controller.signal);
     }
 
@@ -210,6 +231,7 @@ export const fetchUrlTool = defineTool("fetch_url", {
   humanize: (input) => `Read ${quote(input.url, 90)}`,
   describeForApproval: (input) => ({ title: `Read the page at ${quote(input.url, 90)}` }),
   async execute(input, ctx) {
+    assertUrlLength(input.url);
     const syntax = checkUrlSyntax(input.url);
     const hostname = syntax.ok ? syntax.url.hostname : undefined;
     if (ctx.simulated || (hostname && isSimulatedHost(hostname))) {
@@ -217,6 +239,9 @@ export const fetchUrlTool = defineTool("fetch_url", {
       const page = simulation.fetchPage(input.url);
       return { output: { url: page.url, title: page.title, text: capText(page.text) }, simulated: true };
     }
+    // Live mode only: the host must have provenance in this run (F-010).
+    if (!syntax.ok) throw new AppError("TOOL_ERROR", syntax.reason);
+    await assertFetchAllowed(syntax.url, ctx);
     return { output: await fetchUrlLive(input.url), simulated: false };
   },
 });
