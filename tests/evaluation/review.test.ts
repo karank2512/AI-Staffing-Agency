@@ -185,7 +185,7 @@ describe("evaluation: generatePerformanceReview", () => {
     expect(event.title).toBe("Test User reviewed Sam’s performance — recommendation: replace");
   });
 
-  it("recommends KEEP for a strong worker and stores overallScore 0 when there is no score yet", async () => {
+  it("recommends KEEP for a strong worker and refuses to review a worker with no score yet", async () => {
     const strong = await createHiredWorker(t.organization.id);
     const now = Date.now();
     for (let i = 0; i < 3; i++) {
@@ -197,10 +197,13 @@ describe("evaluation: generatePerformanceReview", () => {
     expect(keep.overallScore).toBeGreaterThan(90);
     expect(keep.strengths as string[]).toContain("Accepted 3 of 3 reviewed deliverables");
 
+    const event = await db.activityEvent.findFirstOrThrow({ where: { organizationId: t.organization.id, workerId: strong.worker.id, type: "REVIEW_GENERATED" } });
+    expect(event.detail).toBe(`Score ${Math.round(keep.overallScore)}/100 over the last 3 finished runs`);
+
+    // Not rated is not 0/100: no review is stored (and nothing claims the worker is underperforming).
     const fresh = await createHiredWorker(t.organization.id);
-    const empty = await db.workerReview.findUniqueOrThrow({ where: { id: (await generatePerformanceReview(t.session, fresh.worker.id)).reviewId } });
-    expect(empty.overallScore).toBe(0);
-    expect(empty.recommendation).toBe("KEEP");
+    await expect(generatePerformanceReview(t.session, fresh.worker.id)).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("no evaluated runs yet") });
+    expect(await db.workerReview.count({ where: { workerId: fresh.worker.id } })).toBe(0);
   });
 
   it("is org-scoped and refuses a worker without an active version", async () => {

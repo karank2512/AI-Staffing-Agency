@@ -1,6 +1,6 @@
 import { toJson } from "@/server/db";
 import type { ToolCallRequest } from "@/server/models/types";
-import { DECLINED_MESSAGE } from "@/server/runtime/approvals";
+import { DECLINED_MESSAGE } from "@/server/runtime";
 import { tools } from "@/server/tools";
 import { seededBetween } from "./clock";
 import type { RunWriter, StepHandle } from "./trace";
@@ -65,6 +65,8 @@ export async function writeGatedToolCall(
     error: decision && !approved ? declined : undefined,
     startedAt: toolStart,
     finishedAt: executedAt,
+    // The executor times the call itself, not the human wait before it; a declined call never ran at all.
+    durationMs: !decision ? undefined : approved ? latencyMs : null,
   });
   const toolRow = await writer.db.toolCall.create({
     data: {

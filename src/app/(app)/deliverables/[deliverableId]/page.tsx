@@ -59,7 +59,7 @@ function Content({ d }: { d: DeliverableDetail }) {
               Show all {pluralize(d.rows.length, "underlying record")}
             </summary>
             <div className="mt-2">
-              <DataTable rows={d.rows} maxRows={200} />
+              <DataTable rows={d.rows} columns={d.columns ?? undefined} maxRows={200} showIndex={!d.columns?.includes("rank")} />
             </div>
           </details>
         ) : null}
@@ -69,7 +69,9 @@ function Content({ d }: { d: DeliverableDetail }) {
   if (d.rows) {
     return (
       <div className="space-y-3">
-        <DataTable rows={d.rows} maxRows={100} />
+        {/* Explicit columns: the stored records come out of jsonb with their keys reordered. Ranked records already
+            number themselves, so the table's own "#" column would only compete with `rank`. */}
+        <DataTable rows={d.rows} columns={d.columns ?? undefined} maxRows={100} showIndex={!d.columns?.includes("rank")} />
         <details className="group">
           <summary className="cursor-pointer text-xs text-muted-foreground select-none hover:text-foreground">Show raw {FORMAT_LABEL[d.format]}</summary>
           <pre className="mt-2 max-h-96 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-xs whitespace-pre">{d.content}</pre>
@@ -245,7 +247,7 @@ export default async function DeliverablePage({ params }: { params: Promise<{ de
                 <DetailRow label="Format">{FORMAT_LABEL[d.format]}</DetailRow>
                 <DetailRow label="Created">{formatDateTime(d.createdAt)}</DetailRow>
                 {d.reviewedAt ? <DetailRow label="Reviewed">{formatDateTime(d.reviewedAt)}</DetailRow> : null}
-                <DetailRow label="Id">
+                <DetailRow label="ID">
                   <span className="inline-flex items-center gap-1 font-mono text-xs">
                     {d.id.slice(0, 12)}…
                     <CopyButton value={d.id} />

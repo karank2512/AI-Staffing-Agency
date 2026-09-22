@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { DETERMINISTIC_CHECK_CONFIG_SCHEMAS, type DeterministicCheckType, type EvaluationPlan } from "@/server/domain/blueprint";
 import type { JobSpec } from "@/server/domain/job-spec";
+import { measureConstraintFit, type ConstraintFit } from "./constraint-fit";
 import { completenessStats, duplicateStats, type EvalRecord } from "./records";
 import type { EvalSubject } from "./types";
 
@@ -26,6 +27,8 @@ export interface DeliverableSignals {
   numbersMentioned: number;
   /** Distinct values from the records (company names, categories …) that the prose refers to. */
   entitiesMentioned: string[];
+  /** How many records respect the brief's stage / place / sector constraints; null = nothing to check. */
+  constraintFit: ConstraintFit | null;
 }
 
 const MAX_ENTITY_POOL = 250;
@@ -106,5 +109,6 @@ export function measureDeliverable(spec: JobSpec, plan: EvaluationPlan, subject:
     narrativeChars: narrative === null ? null : narrative.length,
     numbersMentioned: narrative ? (narrative.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).length : 0,
     entitiesMentioned,
+    constraintFit: measureConstraintFit(spec, records),
   };
 }

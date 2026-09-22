@@ -1,11 +1,9 @@
 import type { ActivityType, ActorType, PrismaClient, RunStepKind, RunStepStatus } from "@prisma/client";
 import { toJson } from "@/server/db";
 import { toDbDeliverableFormat, type JobSpec, type WorkerBlueprint } from "@/server/domain";
-import { llm } from "@/server/models";
-import { buildRequestTrace, buildResponseTrace } from "@/server/models/persist";
+import { buildRequestTrace, buildResponseTrace, llm } from "@/server/models";
 import type { ToolCallRequest } from "@/server/models/types";
-import { compact, oneLine } from "@/server/runtime/compact";
-import { narrativeSummary, renderTitle } from "@/server/runtime/deliverable";
+import { compact, deliverableSummary, oneLine, renderTitle } from "@/server/runtime";
 import { tools } from "@/server/tools";
 import { recordUsage } from "@/server/usage";
 import { seededBetween, Timeline } from "./clock";
@@ -49,6 +47,11 @@ export interface StepRow {
   startedAt: Date;
   /** null = still open (PENDING / WAITING). */
   finishedAt: Date | null;
+  /**
+   * Override for RunStep.durationMs (default finishedAt − startedAt), as the executor's StepWriter takes one: a
+   * gated tool call's step reports only its own execution time, never the approval wait; null = it never ran.
+   */
+  durationMs?: number | null;
 }
 
 const MODEL_LATENCY: Record<string, [number, number]> = { fast: [3_200, 8_000], standard: [7_500, 17_000], reasoning: [12_000, 26_000] };
@@ -60,6 +63,16 @@ const TOOL_LATENCY: Record<string, [number, number]> = {
   send_notification: [180, 520],
   calculator: [5, 20],
 };
+
+function stepDuration(row: StepRow): number | null {
+  if (row.durationMs !== undefined) return row.durationMs === null ? null : Math.max(0, Math.round(row.durationMs));
+  return row.finishedAt ? Math.max(0, row.finishedAt.getTime() - row.startedAt.getTime()) : null;
+}
+
+/** ensureDeliverable renders a non-string content value (a JSON deliverable's records) the same way. */
+function renderContent(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
 
 export class RunWriter {
   private nextIndex = 0;
@@ -103,7 +116,7 @@ export class RunWriter {
         error: row.error ?? null,
         startedAt: row.startedAt,
         finishedAt: row.finishedAt,
-        durationMs: row.finishedAt ? Math.max(0, row.finishedAt.getTime() - row.startedAt.getTime()) : null,
+        durationMs: stepDuration(row),
       },
       select: { id: true },
     });
@@ -250,15 +263,18 @@ export class RunWriter {
     });
   }
 
-  /** Deliverable row + DELIVERABLE step + activity, mirroring runtime/deliverable.ts. */
-  async deliverable(args: { content: string; records: Array<Record<string, unknown>> | null }): Promise<{ id: string; title: string }> {
+  /**
+   * Deliverable row + DELIVERABLE step + activity, mirroring runtime/deliverable.ts — including its "In short"
+   * summary (the runtime's own deliverableSummary), so a CSV/JSON deliverable reads like a live one.
+   */
+  async deliverable(args: { contentValue: unknown; records: Array<Record<string, unknown>> | null }): Promise<{ id: string; title: string }> {
     const { blueprint, spec } = this.seat;
     const { deliverable } = blueprint;
     const now = this.timeline.now;
     const title = renderTitle(deliverable.titleTemplate, { jobTitle: spec.title, now });
-    const narrative = narrativeSummary(args.content);
+    const content = renderContent(args.contentValue);
     const count = args.records?.length ?? null;
-    const summary = narrative || (count !== null ? `${count} record${count === 1 ? "" : "s"}` : oneLine(args.content, 280));
+    const summary = deliverableSummary({ blueprint, spec, contentValue: args.contentValue, content, records: args.records });
     const row = await this.db.deliverable.create({
       data: {
         organizationId: this.seat.organizationId,
@@ -269,7 +285,7 @@ export class RunWriter {
         title,
         summary,
         format: toDbDeliverableFormat(deliverable.format),
-        content: args.content,
+        content,
         ...(args.records ? { data: toJson(args.records) } : {}),
         status: "PENDING_REVIEW",
         createdAt: now,
@@ -280,7 +296,7 @@ export class RunWriter {
       kind: "DELIVERABLE",
       title: `Delivered “${title}”`,
       detail: count !== null ? `${count} record${count === 1 ? "" : "s"} · ${deliverable.format}` : deliverable.format,
-      output: { deliverableId: row.id, title, format: deliverable.format, records: count, chars: args.content.length },
+      output: { deliverableId: row.id, title, format: deliverable.format, records: count, chars: content.length },
       durationMs: seededBetween(`${this.runId}:deliverable`, 12, 45),
     });
     await this.activity({

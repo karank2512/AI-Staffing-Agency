@@ -106,9 +106,16 @@ export async function generatePerformanceReview(s: SessionContext, workerId: str
   const periodStart = new Date(periodEnd.getTime() - DEFAULT_METRICS_WINDOW_DAYS * DAY_MS);
   const versionId = worker.currentVersion.id;
 
-  const [metrics, score, rejected, failedRuns] = await Promise.all([
+  // WorkerReview.overallScore is a number: storing 0 for "not rated yet" would show a brand-new (or just
+  // replaced) worker as a 0/100 failure next to a KEEP recommendation. No evaluated run → no review yet.
+  const score = await refreshWorkerScore(worker.id);
+  if (score.score === null) {
+    throw conflict(`${worker.name} has no evaluated runs yet — a performance review needs at least one finished run that has been scored`);
+  }
+  const overallScore = score.score;
+
+  const [metrics, rejected, failedRuns] = await Promise.all([
     getWorkerMetrics(s.organizationId, worker.id, { windowDays: DEFAULT_METRICS_WINDOW_DAYS, workerVersionId: versionId }),
-    refreshWorkerScore(worker.id),
     db.deliverable.findMany({
       where: {
         organizationId: s.organizationId,
@@ -161,7 +168,7 @@ export async function generatePerformanceReview(s: SessionContext, workerId: str
       workerVersionId: versionId,
       periodStart,
       periodEnd,
-      overallScore: score.score ?? 0,
+      overallScore,
       summary: narrative.summary,
       strengths: toJson(narrative.strengths),
       problems: toJson(narrative.problems),
@@ -177,7 +184,8 @@ export async function generatePerformanceReview(s: SessionContext, workerId: str
     organizationId: s.organizationId,
     type: "REVIEW_GENERATED",
     title: `${s.name} reviewed ${worker.name}’s performance — recommendation: ${RECOMMENDATION_LABEL[narrative.recommendation]}`,
-    detail: score.score === null ? "No quality score yet" : `Score ${Math.round(score.score)}/100 over the last ${metrics.windowDays} days`,
+    // The score is computed over the most recent finished runs (not the metrics' day window), so say so.
+    detail: `Score ${Math.round(overallScore)}/100 over the last ${score.sampleSize.runs} finished run${score.sampleSize.runs === 1 ? "" : "s"}`,
     workerId: worker.id,
     jobId: worker.jobId,
     actorType: "USER",

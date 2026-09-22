@@ -76,9 +76,11 @@ export function marketResearchTemplate(ctx: TemplateContext): BlueprintDraft {
 export function marketAnalysisTemplate(ctx: TemplateContext): BlueprintDraft {
   const { spec } = ctx;
   const keyField = ctx.pick("company", "vendor", "competitor", "product", "name");
+  // Plan-level rows ("each competitor's plans") are one per company × plan, so the plan is part of the key.
+  const planField = ctx.pick("plan_name", "plan", "tier_name");
   const rankBy = ctx.pick("starting_price_usd", "price_usd", "monthly_price_usd", "amount_usd") || ctx.numeric();
   const groupBy = ctx.pick("pricing_model", "category", "segment", "stage", "tier");
-  const keyFields = keyField ? [keyField] : [];
+  const keyFields = [keyField, planField].filter((f) => f !== "");
   const priceLike = /price|pricing/.test(rankBy);
 
   const collector = agentDraft({
@@ -140,7 +142,8 @@ export function leadResearchTemplate(ctx: TemplateContext): BlueprintDraft {
   const { spec } = ctx;
   const company = ctx.pick("company", "account", "company_name", "name");
   const contact = ctx.pick("contact_name", "contact", "decision_maker", "full_name");
-  const rankBy = ctx.pick("fit_score", "score", "icp_score", "lead_score") || ctx.numeric();
+  // Only a score says which lead is best; ranking a lead list by headcount or funding would just reorder it.
+  const rankBy = ctx.pick("fit_score", "score", "icp_score", "lead_score") || (ctx.fields.find((f) => /(?:score|rating)$/i.test(f)) ?? "");
   const groupBy = ctx.pick("segment", "industry", "category", "region", "country");
   const keyFields = [company, contact].filter((f) => f !== "");
 

@@ -17,6 +17,8 @@ const IN_FLIGHT: readonly RunStatus[] = ["QUEUED", "RUNNING", "WAITING_FOR_APPRO
 /** How far back failed runs / rejected deliverables stay on the attention strip. */
 const ATTENTION_WINDOW_DAYS = 7;
 const ATTENTION_ITEMS_PER_KIND = 3;
+/** Candidates fetched per kind before dropping the ones already dealt with (see unresolvedFailedRuns). */
+const ATTENTION_CANDIDATES = 25;
 const RECENT_ACTIVITY_LIMIT = 12;
 
 export interface WorkforceStats {
@@ -49,6 +51,8 @@ export type AttentionItem =
       title: string;
       description: string | null;
       toolLabel: string;
+      /** The exact tool input awaiting approval (plain JSON) — shown before the user can approve from the strip. */
+      payload: unknown;
       runId: string;
       requestedAt: string;
     })
@@ -102,6 +106,70 @@ function rosterOrder(a: WorkerCardView, b: WorkerCardView): number {
     a.name.localeCompare(b.name) ||
     a.id.localeCompare(b.id)
   );
+}
+
+/**
+ * Only work from a worker's CURRENT version counts (replacing or rolling back a version is how the user deals with
+ * its failures), and never a retired worker's: the version must still be the `currentFor` of a non-retired worker.
+ */
+const CURRENT_VERSION_OF_SEATED_WORKER = { currentFor: { is: { status: { not: "RETIRED" as const } } } };
+
+/**
+ * Failed runs from the window that nobody has followed up on yet. A failure is resolved once the same worker has a
+ * later run that succeeded, or a later retry (whose own outcome then speaks for it: a failed retry is listed itself).
+ */
+async function unresolvedFailedRuns(organizationId: string, since: Date) {
+  const failed = await db.run.findMany({
+    where: { organizationId, status: "FAILED", finishedAt: { gte: since }, workerVersion: CURRENT_VERSION_OF_SEATED_WORKER },
+    orderBy: [{ finishedAt: "desc" }, { id: "desc" }],
+    take: ATTENTION_CANDIDATES,
+    select: { id: true, workerId: true, error: true, finishedAt: true, createdAt: true, worker: { select: { name: true, avatarColor: true } } },
+  });
+  if (failed.length === 0) return [];
+
+  const oldest = new Date(Math.min(...failed.map((r) => r.createdAt.getTime())));
+  const followUps = await db.run.groupBy({
+    by: ["workerId"],
+    where: {
+      organizationId,
+      workerId: { in: [...new Set(failed.map((r) => r.workerId))] },
+      createdAt: { gt: oldest },
+      OR: [{ status: "SUCCEEDED" }, { trigger: "RETRY" }],
+    },
+    _max: { createdAt: true },
+  });
+  const latestFollowUp = new Map(followUps.map((g) => [g.workerId, g._max.createdAt]));
+  return failed
+    .filter((r) => {
+      const followUp = latestFollowUp.get(r.workerId);
+      return !followUp || followUp <= r.createdAt;
+    })
+    .slice(0, ATTENTION_ITEMS_PER_KIND);
+}
+
+/** Rejected deliverables from the window, minus those the same worker has since made up for with accepted work. */
+async function unresolvedRejections(organizationId: string, since: Date) {
+  const rejected = await db.deliverable.findMany({
+    where: { organizationId, status: "REJECTED", reviewedAt: { gte: since }, workerVersion: CURRENT_VERSION_OF_SEATED_WORKER },
+    orderBy: [{ reviewedAt: "desc" }, { id: "desc" }],
+    take: ATTENTION_CANDIDATES,
+    select: { id: true, title: true, feedback: true, reviewedAt: true, createdAt: true, workerId: true, worker: { select: { name: true, avatarColor: true } } },
+  });
+  if (rejected.length === 0) return [];
+
+  const oldest = new Date(Math.min(...rejected.map((d) => d.createdAt.getTime())));
+  const accepted = await db.deliverable.groupBy({
+    by: ["workerId"],
+    where: { organizationId, workerId: { in: [...new Set(rejected.map((d) => d.workerId))] }, status: "ACCEPTED", createdAt: { gt: oldest } },
+    _max: { createdAt: true },
+  });
+  const latestAccepted = new Map(accepted.map((g) => [g.workerId, g._max.createdAt]));
+  return rejected
+    .filter((d) => {
+      const acceptedAt = latestAccepted.get(d.workerId);
+      return !acceptedAt || acceptedAt <= d.createdAt;
+    })
+    .slice(0, ATTENTION_ITEMS_PER_KIND);
 }
 
 export async function getWorkforce(organizationId: string, now: Date = new Date()): Promise<WorkforceView> {
@@ -164,18 +232,8 @@ export async function getWorkforce(organizationId: string, now: Date = new Date(
     getUsageSummary(organizationId, { from: monthStart, to: now }),
     getUsageSummary(organizationId, { from: startOfMonth(lastMonth), to: endOfMonth(lastMonth) }),
     listApprovals(organizationId, { status: "PENDING" }),
-    db.run.findMany({
-      where: { organizationId, status: "FAILED", finishedAt: { gte: attentionSince } },
-      orderBy: [{ finishedAt: "desc" }],
-      take: ATTENTION_ITEMS_PER_KIND,
-      select: { id: true, workerId: true, error: true, finishedAt: true, createdAt: true, worker: { select: { name: true, avatarColor: true } } },
-    }),
-    db.deliverable.findMany({
-      where: { organizationId, status: "REJECTED", reviewedAt: { gte: attentionSince } },
-      orderBy: [{ reviewedAt: "desc" }],
-      take: ATTENTION_ITEMS_PER_KIND,
-      select: { id: true, title: true, feedback: true, reviewedAt: true, createdAt: true, workerId: true, worker: { select: { name: true, avatarColor: true } } },
-    }),
+    unresolvedFailedRuns(organizationId, attentionSince),
+    unresolvedRejections(organizationId, attentionSince),
     listActivity(organizationId, { limit: RECENT_ACTIVITY_LIMIT }),
   ]);
 
@@ -223,6 +281,7 @@ export async function getWorkforce(organizationId: string, now: Date = new Date(
         title: a.title,
         description: a.description,
         toolLabel: a.toolLabel,
+        payload: a.payload,
         runId: a.runId,
         requestedAt: a.requestedAt,
         workerId: a.worker.id,

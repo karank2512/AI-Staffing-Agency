@@ -121,33 +121,88 @@ export function formatDate(input: DateInput): string {
   return date ? format(date, "MMM d, yyyy") : EMPTY;
 }
 
-/** Words that read wrong in Title/Sentence case. Looked up lower-cased. */
+/**
+ * Words that read wrong in Title/Sentence case — mostly acronyms that show up in worker-produced column names
+ * (`hq`, `source_url`, `icp_score`, `arr_usd`). Looked up lower-cased. Only add words that are never ordinary
+ * English: this map also humanizes status labels and tool names.
+ */
 const ACRONYMS: Readonly<Record<string, string>> = {
+  acv: "ACV",
   ai: "AI",
   api: "API",
   arr: "ARR",
+  b2b: "B2B",
+  b2c: "B2C",
+  cac: "CAC",
   ceo: "CEO",
+  cfo: "CFO",
+  cio: "CIO",
+  cmo: "CMO",
+  coo: "COO",
+  cro: "CRO",
+  crm: "CRM",
   csv: "CSV",
   cto: "CTO",
+  eta: "ETA",
+  faq: "FAQ",
+  gdpr: "GDPR",
+  github: "GitHub",
+  gl: "GL",
+  gtm: "GTM",
+  hq: "HQ",
+  hr: "HR",
+  html: "HTML",
+  icp: "ICP",
   id: "ID",
   ip: "IP",
   json: "JSON",
   kpi: "KPI",
+  linkedin: "LinkedIn",
   llm: "LLM",
+  ltv: "LTV",
   mrr: "MRR",
   nps: "NPS",
+  pdf: "PDF",
+  qa: "QA",
   roi: "ROI",
+  saas: "SaaS",
+  sdk: "SDK",
+  seo: "SEO",
+  sku: "SKU",
   sla: "SLA",
+  sms: "SMS",
+  soc2: "SOC2",
+  sql: "SQL",
+  sso: "SSO",
+  tam: "TAM",
   ui: "UI",
   url: "URL",
   usd: "USD",
   utc: "UTC",
+  vp: "VP",
+  yoy: "YoY",
 };
 
-/** snake_case, kebab-case, camelCase, SCREAMING_CASE or spaced text → words. */
+/** Look like an acronym's plural but aren't one (`hrs` is hours, not "HRs"). */
+const NOT_PLURAL_ACRONYMS: ReadonlySet<string> = new Set(["hrs"]);
+
+/** `hq` → "HQ"; plurals of all-caps acronyms keep a lower-case s (`source_urls` → "URLs", `hqs` → "HQs"). */
+function acronym(word: string): string | undefined {
+  const lower = word.toLowerCase();
+  const exact = ACRONYMS[lower];
+  if (exact !== undefined) return exact;
+  if (lower.length > 2 && lower.endsWith("s") && !NOT_PLURAL_ACRONYMS.has(lower)) {
+    const base = ACRONYMS[lower.slice(0, -1)];
+    if (base !== undefined && /^[A-Z0-9]+$/.test(base)) return `${base}s`;
+  }
+  return undefined;
+}
+
+/** snake_case, kebab-case, camelCase (incl. `sourceURL` / `HQCity`), SCREAMING_CASE or spaced text → words. */
 function splitWords(input: string): string[] {
   return input
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .replace(/[_\-\s]+/g, " ")
     .trim()
     .split(" ")
@@ -172,7 +227,7 @@ export function titleCase(input: string | null | undefined): string {
   const words = splitWords(input);
   if (words.length === 0) return "";
   const hasLower = /[a-z]/.test(input);
-  return words.map((w) => ACRONYMS[w.toLowerCase()] ?? (keepsCaps(w, hasLower) ? w : capitalize(w))).join(" ");
+  return words.map((w) => acronym(w) ?? (keepsCaps(w, hasLower) ? w : capitalize(w))).join(" ");
 }
 
 /**
@@ -185,7 +240,7 @@ export function sentenceCase(input: string | null | undefined): string {
   if (words.length === 0) return "";
   const hasLower = /[a-z]/.test(input);
   return words
-    .map((w, i) => ACRONYMS[w.toLowerCase()] ?? (keepsCaps(w, hasLower) ? w : i === 0 ? capitalize(w) : w.toLowerCase()))
+    .map((w, i) => acronym(w) ?? (keepsCaps(w, hasLower) ? w : i === 0 ? capitalize(w) : w.toLowerCase()))
     .join(" ");
 }
 

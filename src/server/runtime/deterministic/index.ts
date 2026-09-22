@@ -33,6 +33,7 @@ export function runDeterministic(component: DeterministicComponent, context: Rec
   }
 }
 
+export { formatColumnCell, formatUsdCompact, isMoneyColumn, isUrlColumn } from "./cells";
 export { compileReport, renderTable } from "./compile-report";
 export type { CompileReportConfig, ReportMeta } from "./compile-report";
 export { computeStats } from "./compute-stats";

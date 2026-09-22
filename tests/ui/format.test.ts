@@ -184,6 +184,58 @@ describe("titleCase / sentenceCase", () => {
     expect(sentenceCase("amount_usd")).toBe("Amount USD");
   });
 
+  it("keeps record-field acronyms upper-case wherever they sit in the key", () => {
+    // Single-word keys: the acronym *is* the first word, so it must not be sentence-cased to "Hq" / "Id".
+    const bare: Record<string, string> = {
+      hq: "HQ", id: "ID", ceo: "CEO", cto: "CTO", arr: "ARR", mrr: "MRR", nps: "NPS", sla: "SLA",
+      usd: "USD", api: "API", crm: "CRM", icp: "ICP", url: "URL", csv: "CSV",
+    };
+    for (const [key, label] of Object.entries(bare)) {
+      expect(sentenceCase(key)).toBe(label);
+      expect(titleCase(key)).toBe(label);
+    }
+    expect(sentenceCase("hq_city")).toBe("HQ city");
+    expect(sentenceCase("company_hq")).toBe("Company HQ");
+    expect(sentenceCase("ceo_name")).toBe("CEO name");
+    expect(sentenceCase("icp_score")).toBe("ICP score");
+    expect(sentenceCase("crm_owner")).toBe("CRM owner");
+    expect(sentenceCase("arr_usd")).toBe("ARR USD");
+    expect(sentenceCase("response_sla_hours")).toBe("Response SLA hours");
+    expect(sentenceCase("linkedin_url")).toBe("LinkedIn URL");
+    expect(sentenceCase("saas_category")).toBe("SaaS category");
+    expect(sentenceCase("b2b_focus")).toBe("B2B focus");
+    expect(titleCase("hq_country")).toBe("HQ Country");
+  });
+
+  it("treats SCREAMING_CASE and camelCase acronyms the same way", () => {
+    expect(sentenceCase("HQ_CITY")).toBe("HQ city");
+    expect(sentenceCase("SOURCE_URL")).toBe("Source URL");
+    expect(sentenceCase("hqCity")).toBe("HQ city");
+    expect(sentenceCase("sourceURL")).toBe("Source URL");
+    expect(sentenceCase("HQCity")).toBe("HQ city");
+    expect(sentenceCase("ceoLinkedinUrl")).toBe("CEO LinkedIn URL");
+  });
+
+  it("pluralizes all-caps acronyms with a lower-case s, but leaves look-alikes alone", () => {
+    expect(sentenceCase("source_urls")).toBe("Source URLs");
+    expect(sentenceCase("ids")).toBe("IDs");
+    expect(sentenceCase("hqs")).toBe("HQs");
+    expect(titleCase("apis")).toBe("APIs");
+    // `hrs` is hours; brand-cased words don't take the plural rule.
+    expect(sentenceCase("response_hrs")).toBe("Response hrs");
+    expect(sentenceCase("hrs")).toBe("Hrs");
+    expect(sentenceCase("saas_tools")).toBe("SaaS tools");
+    expect(sentenceCase("linkedins")).toBe("Linkedins");
+  });
+
+  it("does not uppercase ordinary words that merely contain an acronym", () => {
+    expect(sentenceCase("headquarters")).toBe("Headquarters");
+    expect(sentenceCase("identity")).toBe("Identity");
+    expect(sentenceCase("paid_on")).toBe("Paid on");
+    expect(sentenceCase("usage_rate")).toBe("Usage rate");
+    expect(sentenceCase("WAITING_FOR_APPROVAL")).toBe("Waiting for approval");
+  });
+
   it("preserves author-written caps inside mixed-case text only", () => {
     expect(titleCase("SOC2 compliance report")).toBe("SOC2 Compliance Report");
     expect(titleCase("RUN_FAILED")).toBe("Run Failed");

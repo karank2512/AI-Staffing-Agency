@@ -32,6 +32,9 @@ const BUYER_TITLES: Record<CategoryGroup, readonly string[]> = {
   serving: ["VP of Engineering", "Head of Platform", "Director of ML Engineering"],
   data: ["VP of Data", "Head of Data Engineering", "Director of ML Operations"],
   trust_agents: ["Head of Engineering", "VP of Product", "Director of AI Platform"],
+  payments: ["VP of Engineering", "Head of Payments Engineering", "Director of Platform Engineering"],
+  lending_banking: ["CTO", "Head of Engineering", "VP of Platform"],
+  risk_compliance: ["Head of Risk Engineering", "VP of Engineering", "Director of Data Science"],
 };
 
 function person(seedKey: string, title: string, emailDomain: string): SimPerson {

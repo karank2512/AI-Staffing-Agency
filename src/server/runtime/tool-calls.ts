@@ -1,4 +1,4 @@
-import type { RunStepStatus, ToolCallStatus } from "@prisma/client";
+import type { Prisma, RunStepStatus, ToolCallStatus } from "@prisma/client";
 import { recordActivity } from "@/server/activity";
 import { db, toJson } from "@/server/db";
 import type { AgentComponent } from "@/server/domain/blueprint";
@@ -13,9 +13,11 @@ import type { StepHandle } from "./steps";
 import type { AgentCheckpoint, PendingToolCall } from "./types";
 
 /**
- * Tool-call batches for one assistant turn. Rows first, execution second, and every outcome is written to the
- * ToolCall row before the next call starts — that is what makes a resumed batch idempotent: a call that already
- * has an outcome is replayed from the row, never executed twice.
+ * Tool-call batches for one assistant turn. Rows first, then a checkpoint that names them, execution last, and
+ * every outcome is written to the ToolCall row before the next call starts — that is what makes a resumed batch
+ * idempotent: whether the slice paused for approval or the executor died mid-batch, the next slice resumes from
+ * the checkpoint's pendingToolCalls and a call that already has an outcome is replayed from its row, never
+ * executed (or billed) twice, and the model turn that asked for the batch is never repeated.
  */
 
 export type BatchResult = { paused: false } | { paused: true; approvalIds: string[] };
@@ -50,6 +52,7 @@ interface RowState {
   status: ToolCallStatus;
   output: unknown;
   error: string | null;
+  latencyMs: number | null;
   step: StepHandle | null;
   /** The TOOL_CALL step still needs a final status (a replayed outcome must not rewrite a finished step). */
   stepOpen: boolean;
@@ -57,14 +60,25 @@ interface RowState {
 
 const OPEN_STEP_STATUSES: ReadonlySet<RunStepStatus> = new Set<RunStepStatus>(["PENDING", "RUNNING", "WAITING"]);
 
+/**
+ * Record a call's outcome on its row — only while the row is still RUNNING, so a slice that lost its run while
+ * the tool was executing (a cancel, or a stale executor waking up after recovery) never overwrites what the run's
+ * tidy-up or its new owner wrote. The exception is a completed external side effect: that it happened is a fact
+ * the record must keep whatever else changed meanwhile.
+ */
+async function settleRow(call: PendingToolCall, data: Prisma.ToolCallUpdateManyMutationInput, sideEffectDone: boolean): Promise<void> {
+  if (sideEffectDone) await db.toolCall.update({ where: { id: call.toolCallId }, data });
+  else await db.toolCall.updateMany({ where: { id: call.toolCallId, status: "RUNNING" }, data });
+}
+
 async function readRow(call: PendingToolCall): Promise<RowState | null> {
   const row = await db.toolCall.findUnique({
     where: { id: call.toolCallId },
-    select: { status: true, output: true, error: true, runStep: { select: { id: true, index: true, startedAt: true, status: true } } },
+    select: { status: true, output: true, error: true, latencyMs: true, runStep: { select: { id: true, index: true, startedAt: true, status: true } } },
   });
   if (!row) return null;
   const step = row.runStep ? { id: row.runStep.id, index: row.runStep.index, startedAt: row.runStep.startedAt } : null;
-  return { status: row.status, output: row.output, error: row.error, step, stepOpen: !!row.runStep && OPEN_STEP_STATUSES.has(row.runStep.status) };
+  return { status: row.status, output: row.output, error: row.error, latencyMs: row.latencyMs, step, stepOpen: !!row.runStep && OPEN_STEP_STATUSES.has(row.runStep.status) };
 }
 
 /** New calls from a model turn: unknown tools get an error message, the rest get RunStep + ToolCall rows. */
@@ -95,6 +109,9 @@ export async function startToolBatch(slice: RunSlice, component: AgentComponent,
     });
     agent.pendingToolCalls.push({ toolCallId: row.id, callId: call.id, toolName: call.name, input: call.input });
   }
+  // Persist the assistant turn + its pending calls BEFORE anything executes: a crash from here on resumes
+  // through resolvePending({ resumed: true }) instead of re-asking the model and re-running the whole batch.
+  if (allowed.length > 0) await slice.saveCheckpoint();
   return resolvePending(slice, component, agent, { resumed: false });
 }
 
@@ -116,32 +133,46 @@ export async function resolvePending(slice: RunSlice, component: AgentComponent,
 
     if (opts.resumed) {
       if (row.status === "SUCCEEDED") {
+        // The executor died between recording the outcome and closing the step: close it from the row.
+        if (step && row.stepOpen) await slice.steps.finish(step, { status: "SUCCEEDED", output: compact(row.output), durationMs: row.latencyMs });
         agent.messages.push(toolMessage(call, row.output));
         continue;
       }
       if (row.status === "FAILED" || row.status === "DENIED") {
         const error = row.error ?? (row.status === "DENIED" ? DECLINED_MESSAGE : "The tool call failed");
-        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error });
+        // The tool never ran in this slice (declined, expired or failed earlier): no duration to report.
+        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error, durationMs: null });
         agent.messages.push(errorMessage(call, error));
         continue;
       }
       if (row.status === "RUNNING" && tools.get(call.toolName)?.sideEffect === "external_write") {
         await db.toolCall.update({ where: { id: call.toolCallId }, data: { status: "FAILED", error: UNKNOWN_OUTCOME, finishedAt: new Date() } });
-        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error: UNKNOWN_OUTCOME });
+        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error: UNKNOWN_OUTCOME, durationMs: null });
         agent.messages.push(errorMessage(call, "outcome unknown after restart"));
         continue;
       }
+    }
+
+    // A cancel (or any loss of the lease) must stop the batch BEFORE the next tool runs, not after it.
+    await slice.lock.assertHeld();
+    if (opts.resumed) {
       // APPROVED, PENDING_APPROVAL or a re-runnable RUNNING call: execute it now.
       await db.toolCall.update({ where: { id: call.toolCallId }, data: { status: "RUNNING" } });
       if (step) await db.runStep.update({ where: { id: step.id }, data: { status: "RUNNING", detail: null } });
     }
 
+    const invokedAt = Date.now();
     const result = await tools.invoke({ toolName: call.toolName, input: call.input, ctx: slice.toolContext(), toolCallId: call.toolCallId });
     const status = statusFor(result);
     const now = new Date();
+    // The step's duration is the call's own execution time: a batch runs its calls one after another and an
+    // approval-gated call waits for a human between its step being created and the tool actually running.
+    const durationMs = "latencyMs" in result ? result.latencyMs : now.getTime() - invokedAt;
+
+    const external = tools.get(call.toolName)?.sideEffect === "external_write";
 
     if (result.status === "approval_required") {
-      await db.toolCall.update({ where: { id: call.toolCallId }, data: { status } });
+      await settleRow(call, { status }, false);
       if (step) await db.runStep.update({ where: { id: step.id }, data: { status: "PENDING", detail: "Waiting for approval" } });
       stillPending.push(call);
       approvals.push({ call, approval: tools.describe(call.toolName, call.input).approval });
@@ -151,13 +182,14 @@ export async function resolvePending(slice: RunSlice, component: AgentComponent,
     if (result.status === "ok") {
       slice.cp.counters.toolCalls += 1;
       slice.cp.counters.costUsd += result.costUsd;
-      await db.toolCall.update({
-        where: { id: call.toolCallId },
-        data: { status, output: toJson(result.output), latencyMs: Math.round(result.latencyMs), costUsd: result.costUsd, simulated: result.simulated, finishedAt: now },
-      });
-      if (step) await slice.steps.finish(step, { status: "SUCCEEDED", output: compact(result.output), detail: result.simulated ? "Simulated" : undefined });
-      agent.messages.push(toolMessage(call, result.output));
-      if (tools.get(call.toolName)?.sideEffect === "external_write") {
+      await settleRow(
+        call,
+        { status, error: null, output: toJson(result.output), latencyMs: Math.round(result.latencyMs), costUsd: result.costUsd, simulated: result.simulated, finishedAt: now },
+        external,
+      );
+      // Recorded before the (fenced) step write: a send that happened is in the feed even if the run was
+      // cancelled while it was going out.
+      if (external) {
         await recordActivity({
           organizationId: slice.run.organizationId,
           type: "TOOL_USED",
@@ -170,15 +202,14 @@ export async function resolvePending(slice: RunSlice, component: AgentComponent,
           metadata: { toolName: call.toolName },
         });
       }
+      if (step) await slice.steps.finish(step, { status: "SUCCEEDED", output: compact(result.output), detail: result.simulated ? "Simulated" : undefined, durationMs });
+      agent.messages.push(toolMessage(call, result.output));
       continue;
     }
 
     const message = result.message;
-    await db.toolCall.update({
-      where: { id: call.toolCallId },
-      data: { status, error: message, finishedAt: now, ...(result.status === "error" ? { latencyMs: Math.round(result.latencyMs) } : {}) },
-    });
-    if (step) await slice.steps.finish(step, { status: "FAILED", error: message });
+    await settleRow(call, { status, error: message, finishedAt: now, ...(result.status === "error" ? { latencyMs: Math.round(result.latencyMs) } : {}) }, false);
+    if (step) await slice.steps.finish(step, { status: "FAILED", error: message, durationMs });
     agent.messages.push(errorMessage(call, message));
   }
 

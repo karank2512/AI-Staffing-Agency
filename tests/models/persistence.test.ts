@@ -9,6 +9,12 @@ import { createHiredWorker } from "../helpers/fixtures";
 import { searchTool } from "./helpers";
 
 describe("models: trace truncation (pure)", () => {
+  it("exposes the trace builders on the module index (the seed writes ModelCall rows with them)", async () => {
+    const models = await import("@/server/models");
+    expect(models.buildRequestTrace).toBe(buildRequestTrace);
+    expect(models.buildResponseTrace).toBe(buildResponseTrace);
+  });
+
   it("clips individual string fields to 2,000 chars and never slices serialized JSON", () => {
     const long = "a".repeat(2_500);
     const clipped = clipDeep({ text: long, nested: { list: [long, "short"], n: 42, flag: true, nothing: null } }) as {

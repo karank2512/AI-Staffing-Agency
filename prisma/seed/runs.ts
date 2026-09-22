@@ -3,11 +3,10 @@ import type { SessionContext } from "@/server/auth/types";
 import { toJson } from "@/server/db";
 import { renderJobBrief } from "@/server/domain";
 import { evaluateRun } from "@/server/evaluation";
-import { oneLine } from "@/server/runtime/compact";
-import type { AgentCheckpoint, RunCheckpoint, RunOutput } from "@/server/runtime/types";
+import { oneLine, type AgentCheckpoint, type RunCheckpoint, type RunOutput } from "@/server/runtime";
 import { backdate } from "./backdate";
 import { addMs, seededBetween } from "./clock";
-import { emulateRun, recordsOf, type ApprovalMode, type EmulatedPart, type EmulatedRun } from "./emulate";
+import { emulateRun, type ApprovalMode, type EmulatedPart, type EmulatedRun } from "./emulate";
 import { declinedMessage, writeGatedToolCall, type ApprovalDecision } from "./approval-call";
 import { RunWriter, type Seat } from "./trace";
 
@@ -65,7 +64,8 @@ async function openRun(env: SeedEnv, seat: Seat, plan: RunPlan, status: RunStatu
     orderBy: { createdAt: "asc" },
     select: { id: true, content: true },
   });
-  const instructions = pending.map((m) => m.content.trim()).filter((s) => s.length > 0);
+  // De-duplicated like enqueueRun does.
+  const instructions = [...new Set(pending.map((m) => m.content.trim()).filter((s) => s.length > 0))];
   const startedAt = addMs(plan.queuedAt, seededBetween(`${seat.workerId}:${plan.seed}:claim`, 600, 2_400));
   const run = await db.run.create({
     data: {
@@ -108,15 +108,21 @@ function emulate(seat: Seat, plan: RunPlan, instructions: string[], approvals: A
   return emulateRun({ blueprint: seat.blueprint, spec: seat.spec, workerName: seat.workerName, instructions, now: startedAt, seed: plan.seed, approvals });
 }
 
-/** Writes every part in order; creates the deliverable at the first boundary where its keys exist (runtime rule). */
-async function writeParts(writer: RunWriter, emulated: EmulatedRun, decision: ApprovalDecision | undefined): Promise<{ deliverableId?: string; deliverableTitle?: string; pending?: { toolCallId: string; approvalId: string } }> {
-  const { blueprint } = writer.seat;
-  const { contentKey, dataKey } = blueprint.deliverable;
-  const produced = new Set<string>(["job_brief", "instructions"]);
+interface WrittenParts {
+  deliverableId?: string;
+  deliverableTitle?: string;
+  /** The records the Deliverable row holds (its `data`), which is what the run's output and the reviewers cite. */
+  records?: Array<Record<string, unknown>>;
+  pending?: { toolCallId: string; approvalId: string };
+}
+
+/** Writes every part in order; the deliverable lands right after the part where the emulator saw its keys appear. */
+async function writeParts(writer: RunWriter, emulated: EmulatedRun, decision: ApprovalDecision | undefined): Promise<WrittenParts> {
+  const made = emulated.deliverable;
   let deliverable: { id: string; title: string } | undefined;
   let pending: { toolCallId: string; approvalId: string } | undefined;
 
-  for (const part of emulated.parts) {
+  for (const [index, part] of emulated.parts.entries()) {
     if (part.kind === "agent") {
       pending = await writeAgentPart(writer, part, decision);
       if (pending) break;
@@ -131,16 +137,9 @@ async function writeParts(writer: RunWriter, emulated: EmulatedRun, decision: Ap
         detail: part.detail,
       });
     }
-    produced.add(part.component.outputKey);
-    if (!deliverable && produced.has(contentKey) && (!dataKey || produced.has(dataKey))) {
-      const value = emulated.context[contentKey];
-      deliverable = await writer.deliverable({
-        content: typeof value === "string" ? value : JSON.stringify(value, null, 2),
-        records: recordsOf(emulated.context, dataKey),
-      });
-    }
+    if (made && index === made.afterPart) deliverable = await writer.deliverable({ contentValue: made.contentValue, records: made.records });
   }
-  return { deliverableId: deliverable?.id, deliverableTitle: deliverable?.title, pending };
+  return { deliverableId: deliverable?.id, deliverableTitle: deliverable?.title, records: deliverable ? (made?.records ?? undefined) : undefined, pending };
 }
 
 async function writeAgentPart(writer: RunWriter, part: Extract<EmulatedPart, { kind: "agent" }>, decision: ApprovalDecision | undefined): Promise<{ toolCallId: string; approvalId: string } | undefined> {
@@ -174,7 +173,7 @@ export async function seedSucceededRun(env: SeedEnv, seat: Seat, plan: RunPlan):
   if (!written.deliverableId || !written.deliverableTitle) throw new Error(`${seat.workerName}'s seeded run produced no deliverable`);
 
   const finishedAt = writer.timeline.now;
-  const records = recordsOf(emulated.context, seat.blueprint.deliverable.dataKey);
+  const { records } = written;
   const [modelCalls, toolCalls, costRow] = await Promise.all([
     db.modelCall.count({ where: { runId: writer.runId } }),
     db.toolCall.count({ where: { runId: writer.runId } }),
@@ -238,7 +237,7 @@ export async function seedSucceededRun(env: SeedEnv, seat: Seat, plan: RunPlan):
     status: "SUCCEEDED",
     deliverableId: written.deliverableId,
     deliverableTitle: written.deliverableTitle,
-    records: records ?? undefined,
+    records,
     finishedAt,
   };
 }
@@ -279,7 +278,7 @@ export async function seedWaitingRun(env: SeedEnv, seat: Seat, plan: RunPlan): P
     status: "WAITING_FOR_APPROVAL",
     deliverableId: written.deliverableId,
     deliverableTitle: written.deliverableTitle,
-    records: recordsOf(emulated.context, seat.blueprint.deliverable.dataKey) ?? undefined,
+    records: written.records,
     approvalId: written.pending.approvalId,
     toolCallId: written.pending.toolCallId,
   };

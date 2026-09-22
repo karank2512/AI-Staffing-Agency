@@ -104,11 +104,13 @@ export function checkUrlSyntax(raw: string): UrlCheck {
 
 export type LookupFn = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 
-const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
+export const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
 /**
- * Full check for a live request: syntax, then DNS. Every resolved address must be public. The resolved
- * addresses are returned so callers can log them; the request itself still goes to the hostname (TLS + SNI).
+ * Full check for a live request: syntax, then DNS. Every resolved address must be public. This is the early,
+ * friendly refusal; it is NOT what makes the request safe on its own — DNS can answer differently a moment later
+ * (rebinding). The request itself goes through guarded-http.ts, whose connection-time lookup re-applies
+ * `isBlockedIp` to the addresses the socket actually dials.
  */
 export async function checkUrl(raw: string, opts: { lookup?: LookupFn } = {}): Promise<HostCheck> {
   const syntax = checkUrlSyntax(raw);

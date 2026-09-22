@@ -1,6 +1,6 @@
 import { ExternalLink } from "lucide-react";
-import { formatCell, inferColumns, isNumericColumn } from "@/lib/cell-format";
-import { formatNumber, sentenceCase } from "@/lib/format";
+import { buildDataTableModel, formatCell } from "@/lib/cell-format";
+import { formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export interface DataTableProps {
@@ -10,19 +10,24 @@ export interface DataTableProps {
   columns?: string[];
   /** Rows rendered before truncating (the footer always reports the true total). Default 50. */
   maxRows?: number;
+  /**
+   * Show the leading "#" row-number column. Default true. Pass false when the records carry their own ordering
+   * (e.g. a `rank` field) — two competing numbers side by side read as a bug.
+   */
+  showIndex?: boolean;
   className?: string;
 }
 
 /**
- * Read-only table for worker-produced records. Headers are humanized from snake_case (`source_url` →
- * "Source URL"); numbers are grouped and right-aligned, URLs become short external links, empty values show a
- * muted em-dash. The header sticks while the body scrolls (max height ~32rem) and wide tables scroll sideways.
+ * Read-only table for worker-produced records. Headers are humanized from snake_case with acronyms kept upper-case
+ * (`source_url` → "Source URL", `hq` → "HQ"); numbers are grouped and right-aligned, URLs become short external
+ * links, empty values show a muted em-dash. The header sticks while the body scrolls (max height ~32rem) and wide
+ * tables scroll sideways.
  */
-export function DataTable({ rows, columns, maxRows = 50, className }: DataTableProps) {
-  const safeRows = Array.isArray(rows) ? rows.filter((r) => r !== null && typeof r === "object") : [];
-  const keys = columns && columns.length > 0 ? columns : inferColumns(safeRows);
+export function DataTable({ rows, columns, maxRows = 50, showIndex = true, className }: DataTableProps) {
+  const model = buildDataTableModel({ rows, columns, maxRows, showIndex });
 
-  if (safeRows.length === 0 || keys.length === 0) {
+  if (model.totalRows === 0 || model.fieldCount === 0) {
     return (
       <div
         data-slot="data-table"
@@ -36,9 +41,7 @@ export function DataTable({ rows, columns, maxRows = 50, className }: DataTableP
     );
   }
 
-  const limit = Math.max(1, Math.floor(maxRows));
-  const visible = safeRows.slice(0, limit);
-  const numeric = new Set(keys.filter((key) => isNumericColumn(safeRows, key)));
+  const { headers, visibleRows, totalRows, fieldCount } = model;
 
   return (
     <div data-slot="data-table" className={cn("overflow-hidden rounded-lg border border-border bg-card", className)}>
@@ -46,44 +49,54 @@ export function DataTable({ rows, columns, maxRows = 50, className }: DataTableP
         <table className="w-full border-separate border-spacing-0 text-left text-[13px] leading-5">
           <thead>
             <tr>
-              <th
-                scope="col"
-                className="sticky top-0 z-10 w-10 border-b border-border bg-muted px-3 py-2 text-right text-xs font-medium text-muted-foreground/70"
-              >
-                #
-              </th>
-              {keys.map((key) => (
-                <th
-                  key={key}
-                  scope="col"
-                  title={key}
-                  className={cn(
-                    "sticky top-0 z-10 border-b border-border bg-muted px-3 py-2 text-xs font-medium whitespace-nowrap text-muted-foreground",
-                    numeric.has(key) && "text-right",
-                  )}
-                >
-                  {sentenceCase(key)}
-                </th>
-              ))}
+              {headers.map((header) =>
+                header.kind === "index" ? (
+                  <th
+                    key="index"
+                    scope="col"
+                    className="sticky top-0 z-10 w-10 border-b border-border bg-muted px-3 py-2 text-right text-xs font-medium text-muted-foreground/70"
+                  >
+                    {header.label}
+                  </th>
+                ) : (
+                  <th
+                    key={`field:${header.key}`}
+                    scope="col"
+                    title={header.key}
+                    className={cn(
+                      "sticky top-0 z-10 border-b border-border bg-muted px-3 py-2 text-xs font-medium whitespace-nowrap text-muted-foreground",
+                      header.numeric && "text-right",
+                    )}
+                  >
+                    {header.label}
+                  </th>
+                ),
+              )}
             </tr>
           </thead>
           <tbody>
-            {visible.map((row, rowIndex) => (
+            {visibleRows.map((row, rowIndex) => (
               <tr key={rowIndex} className="group transition-colors hover:bg-muted/40">
-                <td className="border-b border-border/60 px-3 py-2 text-right align-top text-xs text-muted-foreground/70 tabular-nums group-last:border-b-0">
-                  {rowIndex + 1}
-                </td>
-                {keys.map((key) => (
-                  <td
-                    key={key}
-                    className={cn(
-                      "border-b border-border/60 px-3 py-2 align-top group-last:border-b-0",
-                      numeric.has(key) && "text-right",
-                    )}
-                  >
-                    <Cell value={row[key]} column={key} />
-                  </td>
-                ))}
+                {headers.map((header) =>
+                  header.kind === "index" ? (
+                    <td
+                      key="index"
+                      className="border-b border-border/60 px-3 py-2 text-right align-top text-xs text-muted-foreground/70 tabular-nums group-last:border-b-0"
+                    >
+                      {rowIndex + 1}
+                    </td>
+                  ) : (
+                    <td
+                      key={`field:${header.key}`}
+                      className={cn(
+                        "border-b border-border/60 px-3 py-2 align-top group-last:border-b-0",
+                        header.numeric && "text-right",
+                      )}
+                    >
+                      <Cell value={row[header.key]} column={header.key} />
+                    </td>
+                  ),
+                )}
               </tr>
             ))}
           </tbody>
@@ -91,11 +104,11 @@ export function DataTable({ rows, columns, maxRows = 50, className }: DataTableP
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground tabular-nums">
         <span>
-          Showing {formatNumber(visible.length, 0)} of {formatNumber(safeRows.length, 0)}{" "}
-          {safeRows.length === 1 ? "record" : "records"}
+          Showing {formatNumber(visibleRows.length, 0)} of {formatNumber(totalRows, 0)}{" "}
+          {totalRows === 1 ? "record" : "records"}
         </span>
         <span>
-          {keys.length} {keys.length === 1 ? "field" : "fields"}
+          {fieldCount} {fieldCount === 1 ? "field" : "fields"}
         </span>
       </div>
     </div>

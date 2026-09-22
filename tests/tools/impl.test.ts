@@ -208,9 +208,34 @@ describe("send_notification", () => {
     const long = { ...NOTIFICATION_INPUT, body: "x".repeat(1000) };
     const approval = def.describeForApproval?.(long);
     expect(approval?.title).toBe("Send “Weekly AI Infra Funding Report” to 2 recipients by email");
-    expect(approval?.description?.startsWith("x".repeat(280))).toBe(true);
-    expect(approval?.description?.length).toBeLessThanOrEqual(282);
+    expect(approval?.description?.startsWith("x".repeat(270))).toBe(true);
+    expect(approval?.description?.endsWith("…")).toBe(true);
+    expect(approval?.description?.length).toBeLessThanOrEqual(280);
     expect(def.describeForApproval?.(NOTIFICATION_INPUT).description).toBe(NOTIFICATION_INPUT.body);
+  });
+
+  it("previews a markdown body as plain text for the approval card; the payload keeps the markdown", () => {
+    const body = [
+      "# Customer Feedback Report",
+      "",
+      "## Summary",
+      "",
+      "This run covered **24 feedback items** for the _Customer Feedback Report_. See [the dashboard](https://acme.example/d).",
+      "",
+      "| Category | Sentiment |",
+      "| --- | --- |",
+      "| onboarding | negative |",
+      "",
+      "```json",
+      '{"raw": true}',
+      "```",
+      "- Fix `amount_usd` parsing first",
+    ].join("\n");
+    const described = tools.describe("send_notification", { ...NOTIFICATION_INPUT, body });
+    expect(described.approval.description).toBe(
+      "This run covered 24 feedback items for the Customer Feedback Report. See the dashboard. Fix amount_usd parsing first",
+    );
+    expect(described.approval.description).not.toMatch(/[#*|`]/);
   });
 });
 

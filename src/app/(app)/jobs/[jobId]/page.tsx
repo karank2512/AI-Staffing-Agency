@@ -73,7 +73,15 @@ export default async function JobDetailPage({ params }: Params) {
           </span>
         }
         description={headline(data)}
-        actions={<JobActions jobId={job.id} title={job.title} can={data.can} currentWorker={currentWorker ? { id: currentWorker.id, name: currentWorker.name } : null} />}
+        actions={
+          <JobActions
+            jobId={job.id}
+            title={job.title}
+            status={job.status}
+            can={data.can}
+            currentWorker={currentWorker ? { id: currentWorker.id, name: currentWorker.name } : null}
+          />
+        }
       />
 
       <div className="space-y-8">

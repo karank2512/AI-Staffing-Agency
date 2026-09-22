@@ -1,9 +1,8 @@
 import type { AgentComponent, BlueprintComponent, DeterministicComponent, JobSpec, WorkerBlueprint } from "@/server/domain";
 import { renderJobBrief } from "@/server/domain";
 import type { ChatMessage, ToolCallRequest } from "@/server/models/types";
-import { runDeterministic, type ReportMeta } from "@/server/runtime/deterministic";
-import { buildInitialMessage, buildSystemPrompt } from "@/server/runtime/messages";
-import { createSimulation, seededShuffle } from "@/server/simulation";
+import { buildInitialMessage, buildSystemPrompt, runDeterministic, type ReportMeta } from "@/server/runtime";
+import { agentTurnHints, createSimulation, seededShuffle } from "@/server/simulation";
 import type { Simulation } from "@/server/simulation/types";
 import { tools } from "@/server/tools";
 import type { ToolName } from "@/server/tools/schemas";
@@ -55,11 +54,24 @@ export type EmulatedPart =
   | { kind: "agent"; component: AgentComponent; agent: EmulatedAgent }
   | { kind: "deterministic"; component: DeterministicComponent; summary: Record<string, unknown>; detail: string };
 
+/**
+ * What the Deliverable row is made of, captured at the FIRST component boundary where the blueprint's contentKey
+ * (and dataKey) exist — ensureDeliverable's rule. A JSON deliverable is therefore the collector's raw output, not
+ * the records after later cleaning/ranking steps rewrote the same key.
+ */
+export interface EmulatedDeliverable {
+  /** Index into `parts` after which the runtime creates the row. */
+  afterPart: number;
+  contentValue: unknown;
+  records: Array<Record<string, unknown>> | null;
+}
+
 export interface EmulatedRun {
   context: Record<string, unknown>;
   parts: EmulatedPart[];
   /** Index of the component that paused (agent still mid-flight), or components.length when everything ran. */
   componentIndex: number;
+  deliverable?: EmulatedDeliverable;
 }
 
 export interface EmulateRunArgs {
@@ -142,10 +154,13 @@ export function emulateAgent(component: AgentComponent, args: EmulateRunArgs, co
   const jobBrief = typeof context.job_brief === "string" ? context.job_brief : "";
   const messages: ChatMessage[] = [{ role: "user", content: buildInitialMessage(component, context) }];
   const turns: EmulatedTurn[] = [];
+  // The executor spreads these into every mock turn (the dedupe step's keyFields decide what the brain counts as
+  // a duplicate); without them a seeded run would answer differently from a live run of the same blueprint.
+  const hints = agentTurnHints(blueprint);
 
   for (let turn = 0; turn < component.maxTurns; turn++) {
     const request = structuredClone(messages);
-    const produced = sim.agentTurn({ component, jobFamily: blueprint.jobFamily, spec, jobBrief, instructions, system, messages, tools: toolSpecs });
+    const produced = sim.agentTurn({ component, jobFamily: blueprint.jobFamily, spec, jobBrief, instructions, ...hints, system, messages, tools: toolSpecs });
     const offered = new Set(toolSpecs.map((t) => t.name));
     const toolCalls: ToolCallRequest[] = (produced.toolCalls ?? [])
       .filter((c) => offered.has(c.name))
@@ -208,29 +223,42 @@ function reportMeta(args: EmulateRunArgs, parts: EmulatedPart[]): ReportMeta {
   };
 }
 
+/** ensureDeliverable's trigger: the content key (and the data key, when set) exist in the context. */
+function deliverableReady(blueprint: WorkerBlueprint, context: Record<string, unknown>): boolean {
+  const { contentKey, dataKey } = blueprint.deliverable;
+  return context[contentKey] !== undefined && (!dataKey || context[dataKey] !== undefined);
+}
+
 export function emulateRun(args: EmulateRunArgs): EmulatedRun {
   const sim = createSimulation(() => args.now);
   const context: Record<string, unknown> = { job_brief: renderJobBrief(args.spec), instructions: args.instructions ?? [] };
   const parts: EmulatedPart[] = [];
   const components: BlueprintComponent[] = args.blueprint.components;
+  let deliverable: EmulatedDeliverable | undefined;
 
   for (let index = 0; index < components.length; index++) {
     const component = components[index];
     if (component.type === "agent") {
       const agent = emulateAgent(component, args, context, sim);
       parts.push({ kind: "agent", component, agent });
-      if (agent.pending) return { context, parts, componentIndex: index };
+      if (agent.pending) return { context, parts, componentIndex: index, deliverable };
       context[component.outputKey] = agent.output;
     } else {
       const result = runDeterministic(component, context, reportMeta(args, parts));
       parts.push({ kind: "deterministic", component, summary: result.summary, detail: result.detail });
       context[component.outputKey] = result.value;
     }
+    if (!deliverable && deliverableReady(args.blueprint, context)) {
+      const { contentKey, dataKey } = args.blueprint.deliverable;
+      // Cloned: a later step may rewrite the same key, but the row holds what existed at this boundary.
+      const records = recordsOf(context, dataKey);
+      deliverable = { afterPart: parts.length - 1, contentValue: structuredClone(context[contentKey]), records: records && structuredClone(records) };
+    }
   }
-  return { context, parts, componentIndex: components.length };
+  return { context, parts, componentIndex: components.length, deliverable };
 }
 
-/** Records behind the deliverable (the `dataKey` context value), when they are flat records. */
+/** Records behind the deliverable (the `dataKey` context value), when they are flat records — as ensureDeliverable reads them. */
 export function recordsOf(context: Record<string, unknown>, key: string | undefined): Array<Record<string, unknown>> | null {
   if (!key) return null;
   const value = context[key];

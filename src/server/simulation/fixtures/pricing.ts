@@ -138,10 +138,57 @@ const TEMPLATES: Record<string, CategoryTemplate> = {
   },
 };
 
+/**
+ * Vendors a customer names that are not in the fixture universe (see vendors.ts) get this template: the per-seat
+ * SaaS packaging most "our competitors" lists are about. Prices are illustrative, jittered per vendor slug.
+ */
+export const SAAS_CATEGORY = "Productivity & Collaboration";
+const SAAS_TEMPLATE: CategoryTemplate = {
+  model: "Per-seat subscription",
+  plans: [
+    { name: "Free", base: 0, unit: "per month", includes: "individuals and small teams, limited history and integrations" },
+    { name: "Plus", base: 10, unit: "per seat per month", includes: "unlimited projects, guest access, integrations" },
+    { name: "Business", base: 20, unit: "per seat per month", includes: "SAML SSO, advanced permissions, admin analytics" },
+    ENTERPRISE,
+  ],
+};
+
+// Fintech vendors price per transaction, per account or per platform seat.
+const FINTECH_TEMPLATES: Record<string, CategoryTemplate> = {
+  "Payments Infrastructure": {
+    model: "Per-transaction fee",
+    plans: [
+      { name: "Standard", base: 0.25, decimals: 2, unit: "per transaction + 0.4%", includes: "instant settlement, dashboard, webhooks" },
+      { name: "Scale", base: 0.12, decimals: 2, unit: "per transaction + 0.25%", includes: "volume pricing, smart routing, dedicated support" },
+      ENTERPRISE,
+    ],
+  },
+  "Banking-as-a-Service": {
+    model: "Platform fee plus per-account pricing",
+    plans: [
+      { name: "Launch", base: 1500, unit: "per month", includes: "up to 1,000 accounts, virtual cards, sandbox" },
+      { name: "Growth", base: 4800, unit: "per month", includes: "up to 25,000 accounts, physical cards, compliance tooling" },
+      ENTERPRISE,
+    ],
+  },
+  "RegTech & Compliance": {
+    model: "Annual platform subscription",
+    plans: [
+      { name: "Starter", base: 900, unit: "per month", includes: "KYB checks, monitoring rules, audit log" },
+      { name: "Business", base: 3200, unit: "per month", includes: "case management, regulator reporting, SSO" },
+      ENTERPRISE,
+    ],
+  },
+};
+const FINTECH_CATEGORIES = new Set(["Embedded Finance", "Treasury & FX", "Lending", "WealthTech", "Fraud Prevention", "InsurTech"]);
+
 const FALLBACK: CategoryTemplate = TEMPLATES["Evaluation & Observability"];
 
 export function pricingFor(company: { slug: string; category: string }): CompanyPricing {
-  const template = TEMPLATES[company.category] ?? FALLBACK;
+  const template =
+    TEMPLATES[company.category] ??
+    FINTECH_TEMPLATES[company.category] ??
+    (company.category === SAAS_CATEGORY ? SAAS_TEMPLATE : FINTECH_CATEGORIES.has(company.category) ? FINTECH_TEMPLATES["RegTech & Compliance"] : FALLBACK);
   const plans = template.plans.map((p): PricingPlan => {
     if (p.base === null || p.base === 0) return { name: p.name, price_usd: p.base, unit: p.unit, includes: p.includes };
     // ±25% jitter, stable per (company, plan).
@@ -170,4 +217,15 @@ export function describePlanPrice(plan: PricingPlan): string {
 function withThousands(n: number): string {
   const [whole, fraction] = String(n).split(".");
   return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (fraction ? `.${fraction}` : "");
+}
+
+/** "per seat per month", "per month platform fee" … — a price that is already a monthly figure. */
+export function isMonthlyUnit(unit: string): boolean {
+  return /\b(per|a|\/)\s*month\b|\bmonthly\b|\/mo\b/i.test(unit);
+}
+
+/** The plan's monthly list price: 0 for a free monthly plan, null for usage-based or custom ("contact sales") pricing. */
+export function monthlyPriceOf(plan: PricingPlan): number | null {
+  if (plan.price_usd === null) return null;
+  return isMonthlyUnit(plan.unit) ? plan.price_usd : null;
 }

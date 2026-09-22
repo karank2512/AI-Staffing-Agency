@@ -5,7 +5,7 @@ import { CadenceSchema, cadenceToWorkerFields, computeNextRunAt, describeCadence
 import { conflict, invalid } from "@/server/errors";
 import { cancelWorkerRuns, enqueueRun } from "@/server/runtime";
 import { tools } from "@/server/tools";
-import { loadWorker, plural } from "./shared";
+import { loadWorker, lowerFirst, plural } from "./shared";
 
 /**
  * Worker lifecycle — pause / resume / retire, schedule and permission changes, and the manual "Run now". Status
@@ -118,7 +118,7 @@ export async function updateSchedule(s: SessionContext, workerId: string, schedu
   await recordActivity({
     organizationId: s.organizationId,
     type: "NOTE",
-    title: `${s.name} changed ${worker.name}’s schedule to ${describeCadence(cadence).toLowerCase()}`,
+    title: `${s.name} changed ${worker.name}’s schedule to ${lowerFirst(describeCadence(cadence))}`,
     detail: nextRunAt ? `Next run ${nextRunAt.toISOString()}` : worker.status === "PAUSED" ? "Takes effect when resumed" : undefined,
     workerId: worker.id,
     jobId: worker.jobId,

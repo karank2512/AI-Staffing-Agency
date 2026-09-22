@@ -5,6 +5,7 @@ import { AppError } from "@/server/errors";
 import { llm } from "@/server/models";
 import type { ChatMessage } from "@/server/models/types";
 import { cancelRun, claimNextRun, executeRun, RunOutputSchema } from "@/server/runtime";
+import { simulation, type AgentTurnHints } from "@/server/simulation";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker, makeBlueprint } from "../helpers/fixtures";
 import { activityTypes, checkpointOf, enqueue, kindsOf, loadRun, stepsOf, type TestOrg } from "./helpers";
@@ -154,6 +155,30 @@ describe("runtime: executeRun — full simulated run", () => {
     expect(outcome.status).toBe("SUCCEEDED");
   });
 
+  it("tells the simulated brain how THIS blueprint defines a duplicate, and renders report money compactly", async () => {
+    const base = makeBlueprint();
+    const blueprint = {
+      ...base,
+      components: base.components.map((c) => (c.type === "deterministic" && c.operation === "dedupe" ? { ...c, config: { keyFields: ["company", "stage"] } } : c)),
+    };
+    const hired = await createHiredWorker(t.organization.id, { blueprint });
+    const runId = await enqueue(t, hired);
+    const spy = vi.spyOn(simulation, "agentTurn");
+    try {
+      expect((await executeRun(runId)).status).toBe("SUCCEEDED");
+      const inputs = spy.mock.calls.map(([input]) => input as typeof input & AgentTurnHints);
+      expect(inputs.length).toBeGreaterThanOrEqual(2);
+      for (const input of inputs) expect(input.keyFields).toEqual(["company", "stage"]);
+    } finally {
+      spy.mockRestore();
+    }
+    const deliverable = await db.deliverable.findFirstOrThrow({ where: { runId } });
+    expect(deliverable.content).toMatch(/\| \$\d+(\.\d)?M \|/);
+    // The table is rendering only: the records behind it keep raw numbers.
+    const records = deliverable.data as Array<Record<string, unknown>>;
+    expect(records.every((r) => typeof r.amount_usd === "number")).toBe(true);
+  });
+
   it("produces a JSON deliverable from the records directly when the blueprint asks for json", async () => {
     const blueprint = makeBlueprint({
       overrides: { deliverable: { titleTemplate: "{{job_title}} — {{date}}", format: "json", contentKey: "records", dataKey: "records" } },
@@ -167,7 +192,8 @@ describe("runtime: executeRun — full simulated run", () => {
     expect(deliverable.title).toMatch(new RegExp(`^${hired.spec.title} — \\d{4}-\\d{2}-\\d{2}$`));
     const parsed = JSON.parse(deliverable.content) as unknown[];
     expect(parsed).toEqual(deliverable.data);
-    expect(deliverable.summary).toBe(`${parsed.length} records`);
+    // Summarized from the records (never the raw JSON text); they are not ranked yet at this boundary.
+    expect(deliverable.summary).toMatch(new RegExp(`^${parsed.length} funding rounds, including .+ and .+\\.$`));
     // The deliverable exists at the FIRST boundary where its keys are present: right after the collector.
     const steps = await stepsOf(runId);
     const deliverableIndex = steps.findIndex((s) => s.kind === "DELIVERABLE");

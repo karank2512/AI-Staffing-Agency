@@ -7,6 +7,8 @@ import type { DecideApprovalArgs } from "./types";
 /**
  * A human decision on a paused run. Everything happens in one transaction so the approval, its tool call, the
  * APPROVAL step and the run status can never disagree; the run is re-queued only once no PENDING approval is left.
+ * Decisions on the same run are serialized by a row lock on the Run: two reviewers deciding a run's last two
+ * approvals at once would otherwise each still see the other's as PENDING and neither would re-queue the run.
  */
 
 export const DECLINED_MESSAGE = "A reviewer declined this request";
@@ -44,6 +46,10 @@ export async function decideApproval(args: DecideApprovalArgs): Promise<void> {
 
   // Throwing inside the transaction would roll back every write in it, so the outcome is returned and acted on after.
   const outcome = await db.$transaction(async (tx): Promise<Outcome> => {
+    const head = await tx.approval.findFirst({ where: { id: approvalId, organizationId }, select: { runId: true } });
+    if (!head) return { kind: "missing" };
+    // Everything below reads state committed by any decision that held this lock before us.
+    await tx.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${head.runId} FOR UPDATE`;
     const approval = await tx.approval.findFirst({ where: { id: approvalId, organizationId }, select: APPROVAL_SELECT });
     if (!approval) return { kind: "missing" };
     if (approval.status !== "PENDING" || approval.run.status !== "WAITING_FOR_APPROVAL") {

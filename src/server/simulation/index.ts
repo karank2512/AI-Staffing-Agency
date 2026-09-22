@@ -29,4 +29,10 @@ export function createSimulation(clock: Clock): Simulation {
 export const simulation: Simulation = createSimulation(systemClock);
 
 export { hashSeed, seededPick, seededShuffle } from "./rng";
+// Blueprint-derived extras (dedupe keyFields …) callers spread into `agentTurn`'s input; see brain/hints.ts.
+export { agentTurnHints } from "./brain/hints";
+export type { AgentTurnHints } from "./brain/hints";
+// The brief's hard constraints (stage / place / sector) — also used by the simulated judge to mark down misfits.
+export { constraintMisses, constraintsForSpec, hasConstraints, parseConstraints, sectorOfText } from "./constraints";
+export type { ConstraintMiss, JobConstraints, Sector } from "./constraints";
 export type * from "./types";

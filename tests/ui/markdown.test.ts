@@ -136,6 +136,26 @@ describe("sanitizeHref", () => {
     expect(sanitizeHref("//evil.example")).toBeNull();
     expect(sanitizeHref("")).toBeNull();
   });
+
+  it("rejects relative-looking links that browsers resolve to another host", () => {
+    // Browsers treat "\" as "/" in http(s) URLs, so each of these is protocol-relative.
+    expect(sanitizeHref("/\\evil.example/login")).toBeNull();
+    expect(sanitizeHref("\\\\evil.example")).toBeNull();
+    expect(sanitizeHref("\\/evil.example")).toBeNull();
+    expect(sanitizeHref("/ /evil.example")).toBeNull(); // whitespace is stripped first → "//evil.example"
+    expect(sanitizeHref("/\t\\evil.example")).toBeNull();
+    // Same-site relative links are untouched.
+    expect(sanitizeHref("?tab=performance")).toBe("?tab=performance");
+    expect(sanitizeHref("../deliverables/d1")).toBe("../deliverables/d1");
+    expect(sanitizeHref("/workers/w1?tab=chat#latest")).toBe("/workers/w1?tab=chat#latest");
+  });
+
+  it("drops a backslash link from parsed Markdown but keeps its text", () => {
+    const [paragraph] = parseMarkdown("[here](/\\evil.example/login) and [b](\\\\\\\\evil.example) and [ok](/runs/r1)");
+    if (paragraph?.type !== "paragraph") throw new Error("expected a paragraph");
+    expect(inlineToText(paragraph.children)).toBe("here and b and ok");
+    expect(paragraph.children.filter((n) => n.type === "link")).toEqual([{ type: "link", href: "/runs/r1", children: [text("ok")] }]);
+  });
 });
 
 describe("parseMarkdown — blocks", () => {

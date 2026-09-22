@@ -1,7 +1,7 @@
 import type { SearchResult, ToolOutputs } from "@/server/tools/schemas";
-import { EntityIndex, planFacts, type EntityRef, type Facts } from "../entities";
+import { constraintMisses, hasConstraints } from "../constraints";
+import { EntityIndex, type EntityRef, type Facts } from "../entities";
 import { buildRecord, canonicalField, type EntityKind } from "../fields";
-import { pricingFor } from "../fixtures/pricing";
 import { companyRelevance } from "../search";
 import { stem, tokenize } from "../text";
 import { isPlainRecord, type Conversation } from "./conversation";
@@ -83,15 +83,23 @@ export function gatherCandidates(convo: Conversation, kind: EntityKind, index: E
   return out;
 }
 
-/** What a tool-less (or tool-starved) collector reports: the fixtures most relevant to the job, newest first. */
+/**
+ * What a tool-less (or tool-starved) collector reports: the vendors the customer named (they told us who), then
+ * the fixtures most relevant to the job, newest first.
+ */
 export function fallbackPool(ctx: JobContext, kind: EntityKind, index: EntityIndex): EntityRef[] {
   if (kind === "company") {
-    const score = companyRelevance(ctx.queries[0] ?? "");
-    // index.companies is already newest-first; a stable sort keeps that order within each relevance band.
-    return index.companies
+    const score = companyRelevance(ctx.relevanceQuery);
+    const named = index.namedRefs();
+    const namedKeys = new Set(named.map((r) => r.key));
+    // The universe the brief is about, already newest-first; a stable sort keeps that order within each band.
+    const ranked = index
+      .companiesIn(ctx.constraints.sector ?? "ai_infrastructure")
       .map((c, i) => ({ c, i, score: score(c) }))
       .sort((a, b) => b.score - a.score || a.i - b.i)
-      .map((x) => index.companyRef(x.c));
+      .map((x) => index.companyRef(x.c))
+      .filter((r) => !namedKeys.has(r.key));
+    return [...named, ...ranked];
   }
   return index.refs(kind);
 }
@@ -115,7 +123,7 @@ function focusScore(ref: EntityRef, terms: readonly string[]): number {
 
 function specRelevance(ctx: JobContext, kind: EntityKind, index: EntityIndex): (ref: EntityRef) => number {
   if (kind === "company") {
-    const score = companyRelevance(ctx.queries[0] ?? "");
+    const score = companyRelevance(ctx.relevanceQuery);
     const bySlug = new Map(index.companies.map((c) => [c.company.toLowerCase(), c]));
     return (ref) => {
       const c = bySlug.get(ref.key);
@@ -134,15 +142,52 @@ function recency(ref: EntityRef, kind: EntityKind): number {
 }
 
 /**
- * One-off focus first ("focus on vector databases"), then the spec's own topic, then recency, then the order
- * the worker encountered things. `strict` ("only Series A") drops non-matching entities when any match.
+ * The brief's hard constraints ("15 Series A fintech companies in Europe"): a company that breaks one is not
+ * what the customer asked for, however well it fits otherwise — so it is dropped, even if that leaves fewer
+ * records than the target. Finance reviews scoped to software keep only software lines.
+ */
+export function withinBrief(refs: readonly EntityRef[], ctx: JobContext, kind: EntityKind, index: EntityIndex): EntityRef[] {
+  if (kind === "expense") {
+    if (ctx.expenseScope === "software") return refs.filter((r) => r.facts.group === "software");
+    if (ctx.expenseScope === "invoices") return refs.filter((r) => r.facts.kind === "invoice");
+    return [...refs];
+  }
+  if (kind !== "company" || !hasConstraints(ctx.constraints)) return [...refs];
+  const bySlug = new Map(index.companies.map((c) => [c.company.toLowerCase(), c]));
+  return refs.filter((ref) => {
+    const c = bySlug.get(ref.key);
+    return !c || constraintMisses({ stage: c.stage, location: c.hq, sector: c.sector }, ctx.constraints).length === 0;
+  });
+}
+
+/** Vendors the spec names, earliest-named highest; 0 for everything else. */
+function namedScore(ctx: JobContext, index: EntityIndex): (ref: EntityRef) => number {
+  const order = new Map(index.namedRefs().map((r, i) => [r.key, i]));
+  return (ref) => {
+    const i = order.get(ref.key);
+    return i === undefined ? 0 : ctx.namedVendors.length - i;
+  };
+}
+
+/**
+ * One-off focus first ("focus on vector databases"), then the vendors the spec names, then the spec's own topic,
+ * then recency, then the order the worker encountered things. `strict` ("only Series A") drops non-matching
+ * entities when any match; the brief's own constraints (withinBrief) always apply.
  */
 export function prioritize(refs: readonly EntityRef[], ctx: JobContext, kind: EntityKind, index: EntityIndex): EntityRef[] {
   const relevance = specRelevance(ctx, kind, index);
-  const scored = refs.map((ref, i) => ({ ref, i, focus: focusScore(ref, ctx.directives.focusTerms), spec: relevance(ref), when: recency(ref, kind) }));
+  const named = namedScore(ctx, index);
+  const scored = withinBrief(refs, ctx, kind, index).map((ref, i) => ({
+    ref,
+    i,
+    focus: focusScore(ref, ctx.directives.focusTerms),
+    named: named(ref),
+    spec: relevance(ref),
+    when: recency(ref, kind),
+  }));
   const anyFocus = scored.some((s) => s.focus > 0);
   const kept = ctx.directives.strict && anyFocus ? scored.filter((s) => s.focus > 0) : scored;
-  return kept.sort((a, b) => b.focus - a.focus || b.spec - a.spec || b.when - a.when || a.i - b.i).map((s) => s.ref);
+  return kept.sort((a, b) => b.focus - a.focus || b.named - a.named || b.spec - a.spec || b.when - a.when || a.i - b.i).map((s) => s.ref);
 }
 
 // ── Records ─────────────────────────────────────────────────────────────────
@@ -150,11 +195,6 @@ export function prioritize(refs: readonly EntityRef[], ctx: JobContext, kind: En
 /** Pricing specs that ask for a `plan` column get one row per company × plan instead of one per company. */
 export function entityRecords(refs: readonly EntityRef[], ctx: JobContext, kind: EntityKind, index: EntityIndex): Row[] {
   const wantsPlans = kind === "company" && ctx.fields.some((f) => canonicalField("company", f) === "plan");
-  const facts: Facts[] = wantsPlans
-    ? refs.flatMap((ref) => {
-        const company = index.companies.find((c) => c.company.toLowerCase() === ref.key);
-        return company ? pricingFor(company).plans.map((plan) => planFacts(company, plan)) : [ref.facts];
-      })
-    : refs.map((ref) => ref.facts);
+  const facts: Facts[] = wantsPlans ? refs.flatMap((ref) => index.planFactsFor(ref) ?? [ref.facts]) : refs.map((ref) => ref.facts);
   return facts.map((f) => buildRecord(kind, f, ctx.fields));
 }

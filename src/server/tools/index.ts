@@ -19,5 +19,6 @@ export const tools: Tools = {
 };
 
 export { TOOL_INPUT_SCHEMAS, TOOL_NAMES, SAMPLE_DATASETS } from "./schemas";
+export { clipPlain, markdownProse, markdownToPlainText, plainExcerpt } from "./plain-text";
 export type { SampleDataset, SearchResult, ToolInput, ToolName, ToolOutput, ToolOutputs } from "./schemas";
 export type * from "./types";

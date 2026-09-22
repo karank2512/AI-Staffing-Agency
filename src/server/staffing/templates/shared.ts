@@ -100,7 +100,8 @@ export function sharedRationale(ctx: TemplateContext, opts: { validate: boolean;
     out.push(`Records missing ${ctx.required.join(", ")} are dropped by a deterministic validation step — no model call, no cost, no way to slip through.`);
   }
   if (opts.dedupe && opts.keyFields.length > 0) {
-    out.push(`Duplicates are removed on ${opts.keyFields.join(" + ")} before anything reaches you, so the same ${opts.keyFields[0].replace(/_/g, " ")} never shows up twice.`);
+    const what = opts.keyFields.map((k) => k.replace(/_/g, " ")).join(" and ");
+    out.push(`Duplicates are removed on ${opts.keyFields.join(" + ")} before anything reaches you, so the same ${what} never shows up twice.`);
   }
   if (opts.rankBy) {
     out.push(`Results are ranked by ${opts.rankBy.replace(/_/g, " ")} in code, so the order is consistent from run to run and the most important items come first.`);

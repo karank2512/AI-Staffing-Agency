@@ -7,6 +7,7 @@ import { formatDuration, formatNumber, formatPercent, formatUsd, pluralize } fro
 import { cn } from "@/lib/utils";
 import type { EstimatedDeltasView, VersionCard } from "@/server/queries/worker-manage";
 import { TIER_CLASSES, TIER_LABELS } from "../../../_tabs/versions-labels";
+import { targetCardHeading } from "./replace-labels";
 
 /**
  * Side-by-side comparison for the replace page. Differences between base and target are highlighted in the
@@ -68,7 +69,11 @@ export interface VersionCompareCardProps {
 
 export function VersionCompareCard({ card, against, role, changeReason }: VersionCompareCardProps) {
   const isTarget = role === "target";
-  const heading = isTarget ? (changeReason === "REPLACEMENT" ? "Proposed replacement" : changeReason === "SPEC_CHANGE" ? "Proposed change" : `Version ${card.version}`) : card.status === "ACTIVE" ? "Current version" : `Version ${card.version}`;
+  const heading = isTarget
+    ? targetCardHeading({ changeReason, status: card.status, version: card.version })
+    : card.status === "ACTIVE"
+      ? "Current version"
+      : `Version ${card.version}`;
 
   const stepsById = new Map((against?.steps ?? []).map((s) => [s.id, s] as const));
   const toolsByName = new Map((against?.tools ?? []).map((t) => [t.toolName, t] as const));

@@ -9,7 +9,8 @@ import {
   type JobSpec,
   type WorkerBlueprint,
 } from "@/server/domain";
-import { clip, recostAndValidate } from "./shared";
+import { reportTableColumns } from "@/server/staffing";
+import { clip, lowerFirst, recostAndValidate } from "./shared";
 
 /**
  * Turn a normalized spec-change instruction into a revised blueprint, deterministically. Structural edits are
@@ -25,7 +26,6 @@ export interface SpecChangeResult {
 
 const RANK_LIMIT_FACTOR = 1.5;
 const MIN_RECORDS_FACTOR = 0.8;
-const MAX_TABLE_COLUMNS = 8;
 const MAX_KPIS = 8;
 const STANDING_PREFIX = "Standing instruction from your manager:";
 
@@ -195,6 +195,7 @@ function rewireFormat(bp: WorkerBlueprint, spec: JobSpec, format: DeliverableFor
     contentKey = recordsKey;
   } else {
     const previousAnalyst = bp.components.find((c): c is AgentComponent => isAgent(c) && c.id === "analyst");
+    const columns = reportTableColumns(spec.deliverable.fields, ranked);
     added.push(previousAnalyst ?? analystFor(spec, recordsKey), {
       type: "deterministic",
       id: "compile_report",
@@ -205,7 +206,7 @@ function rewireFormat(bp: WorkerBlueprint, spec: JobSpec, format: DeliverableFor
         title: spec.deliverable.title,
         sections: [
           { heading: "Summary", sourceKey: "insights", as: "markdown" },
-          { heading: "Records", sourceKey: recordsKey, as: "table", ...(fields.length > 0 ? { columns: [...(ranked ? ["rank"] : []), ...fields].slice(0, MAX_TABLE_COLUMNS) } : {}), maxRows: 25 },
+          { heading: "Records", sourceKey: recordsKey, as: "table", ...(columns ? { columns } : {}), maxRows: 25 },
         ],
         includeMethodology: true,
       },
@@ -273,7 +274,7 @@ export function deriveSpecChange(args: { blueprint: WorkerBlueprint; spec: JobSp
   if (cadence) {
     structural = true;
     if (JSON.stringify(cadence) !== JSON.stringify(bp.schedule)) {
-      changes.push(`schedule ${describeCadence(bp.schedule).toLowerCase()} → ${describeCadence(cadence).toLowerCase()}`);
+      changes.push(`schedule ${lowerFirst(describeCadence(bp.schedule))} → ${lowerFirst(describeCadence(cadence))}`);
       bp = { ...bp, schedule: cadence };
     }
   }

@@ -1,6 +1,6 @@
 import type { MessageClassificationResult } from "@/server/domain";
 import { describeCadence } from "@/server/domain";
-import { clip, plural } from "./shared";
+import { clip, lowerFirst, plural } from "./shared";
 import { money, runLine, scheduleSentence, shortDate, type RecentRun, type WorkerChatContext } from "./chat-context";
 
 /**
@@ -42,10 +42,25 @@ const TEMPORARY_MARKERS = [
 const IMPERATIVE_START =
   /^(please\s+)?(can you\s+|could you\s+|would you\s+|pls\s+)?(focus|include|add|skip|only|ignore|use|make|keep|exclude|prioriti[sz]e|look|find|search|send|limit|don'?t|do not|avoid|drop|remove|cover|check|double[- ]check|verify|highlight|list|rank|sort|filter|pull|grab|get|collect|gather|summari[sz]e|write|start|run|try|stick|go|stay|treat|flag|note|remember|target|aim|expand|narrow|widen|restrict|cap|increase|decrease|bump|lower|raise|set|report|deliver|produce|generate|track|monitor|watch|compare|dig|research|investigate)\b/i;
 
+/**
+ * "Can you also include the CEO's LinkedIn?" is a request phrased as a question. It is checked before the
+ * question cues (a trailing "?" or an opening "would") so polite requests still change the work.
+ */
+const REQUEST_CUES = [
+  /^(?:please\s+)?(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:also\s+)?(?:please\s+)?(?:include|add|drop|remove|focus|stop|start|skip|exclude|cover|track|use|keep|limit|list|rank|sort|highlight|find|search|check|look|send|pull|grab|mention|note|flag|show|split|separate|group|prioriti[sz]e|double[- ]check|verify)\b/i,
+  /\bplease (?:also )?(?:add|include)\b/i,
+];
+/** "Also include / add …" extends what every deliverable contains — a lasting change, not a one-off. */
+const EXTENDS_DELIVERABLE = /\balso\s+(?:please\s+)?(?:include|add|cover|track|list|show)\b/i;
+
 const some = (patterns: readonly RegExp[], text: string) => patterns.some((p) => p.test(text));
 
 export function classifyMessageHeuristically(content: string): MessageClassificationResult["classification"] {
   const text = content.trim();
+  if (some(REQUEST_CUES, text)) {
+    if (some(TEMPORARY_MARKERS, text)) return "TEMPORARY_INSTRUCTION";
+    return some(PERMANENT_MARKERS, text) || EXTENDS_DELIVERABLE.test(text) ? "SPEC_CHANGE" : "TEMPORARY_INSTRUCTION";
+  }
   if (INTERROGATIVE_START.test(text)) return "QUESTION";
   if (some(PERMANENT_MARKERS, text)) return "SPEC_CHANGE";
   if (some(QUESTION_CUES, text)) return "QUESTION";
@@ -62,6 +77,7 @@ export function normalizeInstruction(content: string): string {
     /^(from now on|going forward|in (the )?future|permanently|this time|for now|today|just (this )?once|for (the |your )?next run|on (the |your )?next run|next run)[,\s]+/i,
     /^(can|could|would|will) you( please)?\s+/i,
     /^(please|pls)[,\s]+/i,
+    /^also\s+/i,
     /^(i('d| would) like you to|i want you to|i need you to|make sure (you|to)|be sure to|try to)\s+/i,
   ];
   let changed = true;
@@ -158,6 +174,43 @@ function failuresSentence(ctx: WorkerChatContext): string {
   return `${failed.length} of my last ${plural(ctx.recentRuns.length, "run")} failed${errors.length > 0 ? ` — ${errors.map((e) => `“${clip(e, 90)}”`).join(" and ")}` : ""}.`;
 }
 
+function listed(items: readonly string[]): string {
+  return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** How the worker goes about the job, from its design — the part of "why these sources?" that never changes. */
+function approachSentence(ctx: WorkerChatContext): string {
+  const collector = ctx.blueprint.components.find((c) => c.type === "agent" && c.outputFormat === "json");
+  const toolsUsed = collector?.type === "agent" ? collector.tools : [];
+  if (toolsUsed.includes("read_dataset")) return "I work from the records your workspace provides rather than the open web, and I label every item myself instead of sampling.";
+  if (toolsUsed.includes("web_search") && toolsUsed.includes("fetch_url")) {
+    return "I start from a couple of focused searches and open the most relevant results myself, so every record traces back to a page I actually read — announcements and companies' own pages over aggregators.";
+  }
+  if (toolsUsed.includes("web_search")) return "I work from web search results for the brief and keep only what the results actually state.";
+  return "I work only from the inputs I'm given for each run.";
+}
+
+/** What the last finished run actually did: searches, pages and hosts read, and what survived validation. */
+function methodSentence(ctx: WorkerChatContext): string {
+  const m = ctx.lastRunMethod;
+  if (!m) return `${approachSentence(ctx)} I haven't finished a run yet, so there are no sources to show you.`;
+  const parts: string[] = [];
+  if (m.searches.length > 0) {
+    const quoted = m.searches.slice(0, 2).map((q) => `“${clip(q, 60)}”`);
+    parts.push(`searched the web ${m.searches.length === 1 ? "once" : m.searches.length === 2 ? "twice" : `${m.searches.length} times`} (${listed(quoted)}${m.searches.length > 2 ? " and more" : ""})`);
+  }
+  if (m.pagesRead > 0) parts.push(`read ${plural(m.pagesRead, "page")}${m.hosts.length > 0 ? ` on ${listed(m.hosts.slice(0, 3))}` : ""}`);
+  if (m.datasets.length > 0) parts.push(`read the ${listed(m.datasets.map((d) => d.replace(/_/g, " ")))} dataset${m.datasets.length === 1 ? "" : "s"}`);
+  if (m.extractions > 0) parts.push("pulled structured records out of what I read");
+  if (m.collected !== null && m.kept !== null) {
+    parts.push(`kept ${m.kept} of ${plural(m.collected, "record")} after validation${m.checks.includes("dedupe") ? " and de-duplication" : ""}`);
+  } else if (m.delivered !== null) {
+    parts.push(`delivered ${plural(m.delivered, "record")}`);
+  }
+  const did = parts.length > 0 ? ` On my last run (${shortDate(m.at)}) I ${listed(parts)}.` : "";
+  return `${approachSentence(ctx)}${did}`;
+}
+
 function instructionsSentence(ctx: WorkerChatContext): string | null {
   if (ctx.activeInstructions.length === 0) return null;
   return `For my next run I'm holding ${plural(ctx.activeInstructions.length, "one-off instruction")}: ${ctx.activeInstructions.map((i) => `“${clip(i, 100)}”`).join("; ")}.`;
@@ -168,6 +221,9 @@ function recentRunsSentence(ctx: WorkerChatContext): string | null {
   return `Before that: ${ctx.recentRuns.slice(1, 4).map(runLine).join(" — ")}.`;
 }
 
+const METHOD_QUESTION =
+  /\b(?:sources?|method|methodology|how did you (?:find|pick|choose|get|decide|research|come up)|how do you (?:find|pick|choose|decide|research|work|go about)|where did (?:you|this|these|that|it|they)|where do (?:you|these|they) come from|why did you (?:pick|choose|use|select|include|go with|rank)|why (?:these|those|this|that) (?:sources?|companies|sites|pages|results|records|leads)|picked|chose)\b/;
+
 /** First-person answer assembled from the facts the question touches; a general status when nothing matches. */
 export function mockQuestionReply(ctx: WorkerChatContext, question: string): string {
   const q = question.toLowerCase();
@@ -176,6 +232,7 @@ export function mockQuestionReply(ctx: WorkerChatContext, question: string): str
     if (s && !parts.includes(s)) parts.push(s);
   };
 
+  if (METHOD_QUESTION.test(q)) add(methodSentence(ctx));
   if (/\b(cost|spend|spent|budget|expensive|price|pricing|bill)\b/.test(q)) add(costSentence(ctx));
   if (/\b(schedule|scheduled|when|next run|cadence|how often|frequency|calendar)\b/.test(q)) add(scheduleSentence(ctx));
   if (/\b(score|quality|performance|performing|how are you doing|health|review|rating|good job|well)\b/.test(q)) add(scoreSentence(ctx));
@@ -204,7 +261,7 @@ export function temporaryInstructionReply(ctx: WorkerChatContext, instruction: s
     ctx.worker.status === "PAUSED"
       ? "I'm paused at the moment, so it takes effect on the first run after I'm resumed."
       : ctx.worker.nextRunAt
-        ? `My next run is ${describeCadence(ctx.cadence).toLowerCase()} — ${shortDate(ctx.worker.nextRunAt)} — or start one now and I'll use it right away.`
+        ? `My next run is ${lowerFirst(describeCadence(ctx.cadence))} — ${shortDate(ctx.worker.nextRunAt)} — or start one now and I'll use it right away.`
         : "I don't have a scheduled run, so start one with “Run now” whenever you're ready and I'll use it then.";
   const holding = others > 0 ? ` I'm also holding ${plural(others, "other one-off instruction")} for that run.` : "";
   return `Got it — I'll apply this on my next run: “${clip(instruction, 200)}”. ${next}${holding}`;

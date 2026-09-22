@@ -2,14 +2,16 @@ import { recordActivity } from "@/server/activity";
 import type { SessionContext } from "@/server/auth/types";
 import { db, toJson, type DbTx } from "@/server/db";
 import { cadenceToWorkerFields, computeNextRunAt, safeParseBlueprint, type ToolRequirement, type WorkerBlueprint } from "@/server/domain";
-import { AppError, conflict, invalid } from "@/server/errors";
+import { AppError, conflict, invalid, isAppError } from "@/server/errors";
+import { cancelRun } from "@/server/runtime";
 import { tools } from "@/server/tools";
-import { clip, loadVersion, parseStoredBlueprint, versionLabel } from "./shared";
+import { clip, loadVersion, parseStoredBlueprint, plural, versionLabel } from "./shared";
 
 /**
  * activateVersion — the moment a proposal becomes the worker. One transaction swaps the current version, syncs the
  * permission grants to the new blueprint, resets the worker's track record (a new version starts clean) and
- * re-derives the schedule. It refuses while a run is in flight so no run ever straddles two versions.
+ * re-derives the schedule. It refuses while a run is in flight so no run ever straddles two versions, and cancels
+ * runs still queued on the outgoing version so none of them executes on the replaced design.
  */
 
 const MAX_NAME_CHARS = 40;
@@ -86,8 +88,38 @@ function grantDetail(sync: GrantSyncResult): string[] {
   return lines;
 }
 
+/**
+ * Runs still QUEUED on an outgoing version — a retry waiting out its backoff, a run released by an approval, one
+ * waiting for an executor slot — would otherwise execute on the replaced design after the swap (with grants
+ * already synced to the new one). They are cancelled before the swap; the swap itself refuses if one slips in.
+ * Nothing is cancelled when the activation is going to be refused anyway.
+ */
+async function cancelOutgoingQueuedRuns(s: SessionContext, versionId: string): Promise<number> {
+  const version = await loadVersion(s.organizationId, versionId);
+  if (version.status !== "PROPOSED" || version.worker.status === "RETIRED") return 0;
+  const workerId = version.worker.id;
+  const inFlight = await db.run.count({ where: { organizationId: s.organizationId, workerId, status: { in: ["RUNNING", "WAITING_FOR_APPROVAL"] } } });
+  if (inFlight > 0) return 0;
+  const queued = await db.run.findMany({
+    where: { organizationId: s.organizationId, workerId, status: "QUEUED", workerVersionId: { not: version.id } },
+    select: { id: true },
+  });
+  let cancelled = 0;
+  for (const run of queued) {
+    try {
+      await cancelRun(s, run.id);
+      cancelled += 1;
+    } catch (e) {
+      // Claimed (or finished) between the listing and the guarded transition: the swap below will refuse.
+      if (!isAppError(e) || e.code !== "INVALID_TRANSITION") throw e;
+    }
+  }
+  return cancelled;
+}
+
 export async function activateVersion(s: SessionContext, versionId: string, opts: { newName?: string } = {}): Promise<void> {
   const newName = opts.newName === undefined ? undefined : cleanName(opts.newName);
+  const cancelledQueued = await cancelOutgoingQueuedRuns(s, versionId);
 
   const activated = await db.$transaction(async (tx) => {
     const version = await loadVersion(s.organizationId, versionId, tx);
@@ -100,6 +132,10 @@ export async function activateVersion(s: SessionContext, versionId: string, opts
     const inFlight = await tx.run.count({ where: { workerId: worker.id, status: { in: ["RUNNING", "WAITING_FOR_APPROVAL"] } } });
     if (inFlight > 0) {
       throw conflict(`${worker.name} is in the middle of a run. Wait for it to finish, or cancel it, before switching versions.`);
+    }
+    const queuedOnOld = await tx.run.count({ where: { workerId: worker.id, status: "QUEUED", workerVersionId: { not: version.id } } });
+    if (queuedOnOld > 0) {
+      throw conflict(`${worker.name} just queued a run on the current version. Try again in a moment, or cancel that run first.`);
     }
 
     let blueprint: WorkerBlueprint = parseStoredBlueprint(version.blueprint);
@@ -154,7 +190,12 @@ export async function activateVersion(s: SessionContext, versionId: string, opts
     version.changeReason === "REPLACEMENT"
       ? `${s.name} hired a replacement for ${activated.previousName}${activated.name !== activated.previousName ? ` — welcome ${activated.name}` : ""}`
       : `${s.name} updated how ${activated.name} works`;
-  const detail = [`v${version.version}`, version.changeSummary ? clip(version.changeSummary, 200) : null, ...grantDetail(activated.sync)]
+  const detail = [
+    `v${version.version}`,
+    version.changeSummary ? clip(version.changeSummary, 200) : null,
+    ...grantDetail(activated.sync),
+    cancelledQueued > 0 ? `cancelled ${plural(cancelledQueued, "queued run")} of the previous version` : null,
+  ]
     .filter((x): x is string => x !== null)
     .join(" · ");
   await recordActivity({

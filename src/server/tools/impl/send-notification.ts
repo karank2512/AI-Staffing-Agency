@@ -1,4 +1,5 @@
 import { defineTool, plural, quote } from "../define";
+import { plainExcerpt } from "../plain-text";
 
 const CHANNEL_LABEL = { email: "email", slack: "Slack" } as const;
 
@@ -17,7 +18,8 @@ export const sendNotificationTool = defineTool("send_notification", {
     `Sent ${quote(input.subject)} to ${plural(input.recipients.length, "recipient")} via ${CHANNEL_LABEL[input.channel]}`,
   describeForApproval: (input) => ({
     title: `Send ${quote(input.subject)} to ${plural(input.recipients.length, "recipient")} by ${CHANNEL_LABEL[input.channel]}`,
-    description: input.body.length > APPROVAL_PREVIEW_CHARS ? `${input.body.slice(0, APPROVAL_PREVIEW_CHARS).trimEnd()}…` : input.body,
+    // Approval cards render this verbatim, so it is a plain-text preview; the payload keeps the raw markdown body.
+    description: plainExcerpt(input.body, APPROVAL_PREVIEW_CHARS) || undefined,
   }),
   async execute(input) {
     // Phase 1: no mail/Slack connectors exist yet. The approval + activity trail is real; delivery lands in a

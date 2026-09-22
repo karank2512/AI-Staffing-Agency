@@ -2,13 +2,15 @@ import { recordActivity } from "@/server/activity";
 import { db, toJson } from "@/server/db";
 import { evaluateRun, refreshWorkerScore } from "@/server/evaluation";
 import { errorMessage } from "@/server/errors";
+import { tools } from "@/server/tools";
+import { parseCheckpoint } from "./checkpoint";
 import { oneLine } from "./compact";
-import { RunFailure } from "./failure";
+import { RunCancelled, RunFailure } from "./failure";
 import { log } from "./log";
 import type { RunSlice } from "./slice";
-import type { ExecuteOutcome, RunOutput } from "./types";
+import type { AgentCheckpoint, ExecuteOutcome, RunOutput } from "./types";
 
-/** Terminal transitions of a slice: success (with evaluation) and failure (retry with backoff, or final). */
+/** Terminal transitions of a slice: success (with evaluation), failure (retry with backoff, or final), cancel. */
 
 const RETRY_BACKOFF_MS = 15_000;
 const usd = (n: number) => `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
@@ -81,6 +83,53 @@ export async function finishSuccess(slice: RunSlice): Promise<ExecuteOutcome> {
   return { status: "SUCCEEDED", deliverableIds: output.deliverableIds };
 }
 
+/** The run ends here as CANCELLED (e.g. its worker was retired mid-run); same tidy-up as cancelRun. */
+export async function finishCancelled(slice: RunSlice, reason: string): Promise<ExecuteOutcome> {
+  const { run } = slice;
+  const checkpoint = slice.snapshot();
+  await slice.lock.transition("CANCELLED", { error: reason, checkpoint: toJson(checkpoint), durationMs: checkpoint.counters.activeMs, finishedAt: new Date() });
+  log.warn(`run ${run.id} cancelled: ${reason}`);
+  await recordActivity({
+    organizationId: run.organizationId,
+    type: "RUN_CANCELLED",
+    title: `${slice.workerName}’s run was cancelled`,
+    detail: reason,
+    workerId: run.workerId,
+    jobId: run.jobId,
+    runId: run.id,
+    actorType: "SYSTEM",
+  });
+  return { status: "CANCELLED" };
+}
+
+const EXTERNAL_WRITE_TOOLS = () =>
+  tools
+    .list()
+    .filter((t) => t.sideEffect === "external_write")
+    .map((t) => t.name);
+
+/**
+ * The conversation a retry must continue instead of restarting the component: once an agent has changed the
+ * outside world (a notification went out), starting it from scratch would ask to do it again — a second approval
+ * for a message that was already delivered. The persisted agent checkpoint is used (never the in-memory one,
+ * which may be mid-batch): it either contains the side effect's result or still lists the call as pending, which
+ * the resume replays from its SUCCEEDED row.
+ */
+async function agentToKeep(slice: RunSlice, componentId: string): Promise<AgentCheckpoint | undefined> {
+  const component = slice.blueprint.components.find((c) => c.id === componentId);
+  if (!component || component.type !== "agent") return undefined;
+  const names = EXTERNAL_WRITE_TOOLS().filter((n) => component.tools.includes(n));
+  if (names.length === 0) return undefined;
+  const sent = await db.toolCall.findFirst({
+    where: { runId: slice.run.id, status: "SUCCEEDED", toolName: { in: names }, runStep: { componentId } },
+    select: { id: true },
+  });
+  if (!sent) return undefined;
+  const row = await db.run.findUnique({ where: { id: slice.run.id }, select: { checkpoint: true } });
+  const agent = parseCheckpoint(row?.checkpoint)?.agent;
+  return agent?.componentId === componentId ? agent : undefined;
+}
+
 export async function finishFailure(slice: RunSlice, failure: RunFailure): Promise<ExecuteOutcome> {
   const { run, cp } = slice;
   const message = oneLine(failure.message, 1_000);
@@ -95,10 +144,21 @@ export async function finishFailure(slice: RunSlice, failure: RunFailure): Promi
 
   const willRetry = failure.retryable && run.attempt < run.maxAttempts;
   if (willRetry) {
-    // Restart the failed component from its own beginning; the step index keeps counting up.
+    // A retired worker's re-queued run would never be claimed again.
+    try {
+      await slice.assertWorkerNotRetired();
+    } catch (e) {
+      if (e instanceof RunCancelled) return await finishCancelled(slice, e.reason);
+      throw e;
+    }
+    // Restart the failed component from its own beginning (the step index keeps counting up) — unless it
+    // already had an external side effect, in which case the retry continues its conversation after it.
+    const failedComponentId = slice.blueprint.components[slice.componentStart.index]?.id;
+    const kept = failedComponentId ? await agentToKeep(slice, failedComponentId) : undefined;
     cp.componentIndex = slice.componentStart.index;
     cp.context = slice.componentStart.context;
-    cp.agent = undefined;
+    cp.agent = kept;
+    if (kept) log.info(`run ${run.id}: ${failedComponentId} already had an external side effect; the retry resumes its conversation`);
     await slice.lock.transition("QUEUED", {
       attempt: run.attempt + 1,
       availableAt: new Date(Date.now() + RETRY_BACKOFF_MS * run.attempt),

@@ -3,6 +3,9 @@ import { db } from "@/server/db";
 import type { ReplacementAnalysis, ReplacementPlan } from "@/server/domain";
 import { recordDeliverableFeedback } from "@/server/evaluation";
 import { applyReplacementPlan, getVersionComparison, hireReplacement, listVersions, proposeReplacement } from "@/server/workers";
+import type { ReplacementEvidence } from "@/server/workers/replace-evidence";
+import { failurePatternsFrom } from "@/server/workers/replace-mock";
+import { formatKpiValue } from "@/server/workers/shared";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker, makeBlueprint, makeJobSpec } from "../helpers/fixtures";
 import { activityOf, createDeliverable, createJudgeEvaluation, createRun, daysAgo, grantsOf, loadVersionRow, loadWorkerRow, records, type Hired, type TestOrg } from "./helpers";
@@ -18,6 +21,44 @@ const basePlan: ReplacementPlan = {
   addDedupeStep: false,
   estimatedDeltas: { qualityPct: 20, costPct: 25, latencyPct: 10 },
 };
+
+describe("replacement evidence reads like a manager wrote it", () => {
+  it("formats KPI misses in their unit: percentages, counts, dollars and durations", () => {
+    const evidence = {
+      windowDays: 30,
+      runs: 7,
+      succeeded: 4,
+      failed: 3,
+      failedRuns: [],
+      evaluations: 0,
+      lowEvaluations: [],
+      rejectedDeliverables: [],
+      recordShortfalls: { min: null, withRecords: 0, short: 0, averageRecords: null },
+      passThreshold: 0.7,
+      kpiMisses: [
+        { kpiId: "acceptance_rate", name: "Acceptance rate", metric: "acceptance_rate", unit: "%", target: 0.85, actual: 0.3333, met: false, direction: "higher_is_better" },
+        { kpiId: "quality_score", name: "Quality score", metric: "quality_score", unit: "%", target: 0.8, actual: 0.6675, met: false, direction: "higher_is_better" },
+        { kpiId: "records_per_run", name: "Records per run", metric: "records_per_run", unit: "records", target: 10, actual: 7, met: false, direction: "higher_is_better" },
+        { kpiId: "cost_per_run", name: "Cost per run", metric: "cost_per_run_usd", unit: "$", target: 1, actual: 1.2, met: false, direction: "lower_is_better" },
+        { kpiId: "duration", name: "Run time", metric: "duration_sec", unit: "sec", target: 300, actual: 425, met: false, direction: "lower_is_better" },
+      ],
+    } as unknown as ReplacementEvidence;
+    const kpi = failurePatternsFrom(evidence).find((p) => p.pattern.includes("KPI"));
+    expect(kpi?.evidence).toBe(
+      "Acceptance rate at 33% vs target 85%; Quality score at 67% vs target 80%; Records per run at 7 vs target 10; Cost per run at $1.20 vs target $1.00; Run time at 7m 05s vs target 5m",
+    );
+    expect(kpi?.evidence).not.toMatch(/0\.\d{3}/);
+  });
+
+  it("formatKpiValue handles every display unit and missing values", () => {
+    expect(formatKpiValue(0.5714, "%")).toBe("57%");
+    expect(formatKpiValue(0.004, "$")).toBe("$0.0040");
+    expect(formatKpiValue(45, "sec")).toBe("45s");
+    expect(formatKpiValue(12.25, "records")).toBe("12.3");
+    expect(formatKpiValue(3, "leads")).toBe("3 leads");
+    expect(formatKpiValue(null, "%")).toBe("n/a");
+  });
+});
 
 describe("applyReplacementPlan", () => {
   const spec = makeJobSpec();
@@ -192,6 +233,15 @@ describe("proposeReplacement / hireReplacement", () => {
     } finally {
       await other.cleanup();
     }
+  });
+
+  it("retires the old version's queued work: only the replacement's first run is left on the queue", async () => {
+    const leftover = await createRun(hired, { status: "QUEUED" }); // e.g. a retry in backoff on v1
+    const { versionId } = await proposeReplacement(t.session, hired.worker.id);
+    const { runId } = await hireReplacement(t.session, versionId);
+    expect((await db.run.findUniqueOrThrow({ where: { id: leftover.id } })).status).toBe("CANCELLED");
+    const queued = await db.run.findMany({ where: { workerId: hired.worker.id, status: "QUEUED" } });
+    expect(queued.map((r) => [r.id, r.workerVersionId, r.trigger])).toEqual([[runId, versionId, "HIRE"]]);
   });
 
   it("skips the first run when asked, and refuses to hire a non-proposed version", async () => {

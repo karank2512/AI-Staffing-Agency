@@ -21,6 +21,8 @@ function stepApprovalId(input: unknown): string | undefined {
  */
 export async function pauseForApproval(slice: RunSlice, component: AgentComponent, agent: AgentCheckpoint, requests: ApprovalRequest[]): Promise<string[]> {
   const { run } = slice;
+  // Asking a human to approve work for a retired worker would leave a request nobody can act on.
+  await slice.assertWorkerNotRetired();
   const created = await db.$transaction(async (tx) => {
     const waiting = await tx.runStep.findMany({ where: { runId: run.id, kind: "APPROVAL", status: "WAITING" }, select: { input: true } });
     const stepsFor = new Set(waiting.map((s) => stepApprovalId(s.input)).filter((id): id is string => !!id));

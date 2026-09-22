@@ -1,12 +1,16 @@
 import type { SimCompany } from "@/server/simulation/types";
+import type { Sector } from "../constraints";
 import { isoDaysAgo } from "../dates";
 
 /**
  * 48 CLEARLY FICTIONAL AI-infrastructure companies (names, funds and people are invented; every URL uses the
  * reserved `.example` TLD). `daysAgo` is resolved against the clock at call time so rounds always look recent.
+ * This is the default universe; a second, smaller one (fintech.ts) exists for briefs that target fintech.
  */
 
-export type CategoryGroup = "compute" | "serving" | "data" | "trust_agents";
+export type AiInfraGroup = "compute" | "serving" | "data" | "trust_agents";
+export type FintechGroup = "payments" | "lending_banking" | "risk_compliance";
+export type CategoryGroup = AiInfraGroup | FintechGroup;
 
 export const CATEGORY_GROUPS: Record<CategoryGroup, { label: string; categories: readonly string[] }> = {
   compute: { label: "Compute, training and edge", categories: ["GPU Cloud", "Training Orchestration", "Edge AI"] },
@@ -16,6 +20,19 @@ export const CATEGORY_GROUPS: Record<CategoryGroup, { label: string; categories:
     label: "Agents, evaluation and AI security",
     categories: ["Evaluation & Observability", "Agent Infrastructure", "AI Security & Governance"],
   },
+  payments: { label: "Fintech: payments, embedded finance and treasury", categories: ["Payments Infrastructure", "Embedded Finance", "Treasury & FX"] },
+  lending_banking: { label: "Fintech: lending, banking and wealth", categories: ["Lending", "Banking-as-a-Service", "WealthTech"] },
+  risk_compliance: { label: "Fintech: compliance, fraud and insurance", categories: ["RegTech & Compliance", "Fraud Prevention", "InsurTech"] },
+};
+
+export const SECTOR_OF_GROUP: Record<CategoryGroup, Sector> = {
+  compute: "ai_infrastructure",
+  serving: "ai_infrastructure",
+  data: "ai_infrastructure",
+  trust_agents: "ai_infrastructure",
+  payments: "fintech",
+  lending_banking: "fintech",
+  risk_compliance: "fintech",
 };
 
 export interface CompanyFixture {
@@ -35,10 +52,11 @@ export interface CompanyFixture {
 export interface CompanyEntity extends SimCompany {
   slug: string;
   group: CategoryGroup;
+  sector: Sector;
   daysAgo: number;
 }
 
-type Row = [
+export type Row = [
   company: string,
   slug: string,
   stage: CompanyFixture["stage"],
@@ -125,20 +143,24 @@ const BY_CATEGORY: Record<string, Row[]> = {
   ],
 };
 
-export const COMPANY_FIXTURES: readonly CompanyFixture[] = Object.entries(BY_CATEGORY).flatMap(([category, rows]) =>
-  rows.map(([company, slug, stage, amountMillions, daysAgo, lead_investor, hq, employees, description]) => ({
-    company,
-    slug,
-    category,
-    description,
-    stage,
-    amount_usd: Math.round(amountMillions * 1_000_000),
-    daysAgo,
-    lead_investor,
-    hq,
-    employees,
-  })),
-);
+export function fixturesFrom(byCategory: Record<string, Row[]>): CompanyFixture[] {
+  return Object.entries(byCategory).flatMap(([category, rows]) =>
+    rows.map(([company, slug, stage, amountMillions, daysAgo, lead_investor, hq, employees, description]) => ({
+      company,
+      slug,
+      category,
+      description,
+      stage,
+      amount_usd: Math.round(amountMillions * 1_000_000),
+      daysAgo,
+      lead_investor,
+      hq,
+      employees,
+    })),
+  );
+}
+
+export const COMPANY_FIXTURES: readonly CompanyFixture[] = fixturesFrom(BY_CATEGORY);
 
 export function groupOfCategory(category: string): CategoryGroup {
   const hit = (Object.keys(CATEGORY_GROUPS) as CategoryGroup[]).find((g) => CATEGORY_GROUPS[g].categories.includes(category));
@@ -147,7 +169,11 @@ export function groupOfCategory(category: string): CategoryGroup {
 
 /** Most recent round first. */
 export function companyEntities(now: Date): CompanyEntity[] {
-  return COMPANY_FIXTURES.map((f) => ({
+  return entitiesFrom(COMPANY_FIXTURES, now);
+}
+
+export function entitiesFrom(fixtures: readonly CompanyFixture[], now: Date): CompanyEntity[] {
+  return fixtures.map((f) => ({
     company: f.company,
     website: `https://${f.slug}.example`,
     category: f.category,
@@ -161,6 +187,7 @@ export function companyEntities(now: Date): CompanyEntity[] {
     source_url: `https://news.example/funding/${f.slug}`,
     slug: f.slug,
     group: groupOfCategory(f.category),
+    sector: SECTOR_OF_GROUP[groupOfCategory(f.category)],
     daysAgo: f.daysAgo,
   })).sort((a, b) => a.daysAgo - b.daysAgo);
 }

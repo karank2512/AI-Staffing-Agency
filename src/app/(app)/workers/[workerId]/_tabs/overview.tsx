@@ -10,6 +10,7 @@ import {
   FileText,
   Filter,
   Gauge,
+  History,
   Inbox,
   MinusCircle,
   ShieldCheck,
@@ -29,9 +30,10 @@ import { formatDuration, formatNumber, formatPercent, formatUsd, formatUsdPrecis
 import { TONE_CLASSES } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { toDbDeliverableFormat } from "@/server/domain";
-import { getWorkerOverview, type PipelineStep } from "@/server/queries/worker-profile";
+import { getWorkerOverview, type ActiveVersionRef, type PipelineStep, type WorkerReviewRow } from "@/server/queries/worker-profile";
+import { GenerateReviewButton } from "../_components/generate-review";
 import { formatKpiValue, kpiVerdict } from "../_components/kpi-format";
-import { formatLabel, operationLabel, RECOMMENDATION_META } from "../_components/labels";
+import { beforeChangeLabel, formatLabel, operationLabel, RECOMMENDATION_META } from "../_components/labels";
 import { RunsTable } from "../_components/runs-table";
 import { TierChip } from "../_components/tier-chip";
 import type { WorkerTabProps } from "./types";
@@ -53,8 +55,14 @@ export default async function OverviewTab({ session, workerId, workerName }: Wor
 
   return (
     <>
+      {/* A verdict only drives the page while it is about the version running today; once Sam has been replaced
+          (or changed), an old "replace" call is history and must not push the user to replace the new version. */}
       {review && review.recommendation !== "KEEP" ? (
-        <ReviewBanner workerId={workerId} workerName={workerName} recommendation={review.recommendation} detail={review.recommendationDetail} createdAt={review.createdAt} />
+        review.forCurrentVersion ? (
+          <ReviewBanner workerId={workerId} workerName={workerName} recommendation={review.recommendation} detail={review.recommendationDetail} createdAt={review.createdAt} />
+        ) : data.activeVersion ? (
+          <StaleReviewNote workerId={workerId} workerName={workerName} review={review} active={data.activeVersion} />
+        ) : null
       ) : null}
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -325,6 +333,31 @@ function ReviewBanner({
             <Link href={`/workers/${workerId}?tab=chat`}>Talk to {workerName}</Link>
           </Button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function StaleReviewNote({ workerId, workerName, review, active }: { workerId: string; workerName: string; review: WorkerReviewRow; active: ActiveVersionRef }) {
+  const meta = RECOMMENDATION_META[review.recommendation];
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-dashed bg-card/40 p-4 sm:flex-row sm:items-center">
+      <History className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">
+          No performance review of v{active.version} yet
+        </p>
+        <p className="mt-0.5 text-sm text-pretty text-muted-foreground">
+          The last review (&ldquo;{meta.headline(workerName)}&rdquo;, <RelativeTime iso={review.createdAt} />) was of v{review.version},{" "}
+          {beforeChangeLabel(active.changeReason)}. It no longer describes how {workerName} works today — review v{active.version} once it has a
+          few runs behind it.
+        </p>
+      </div>
+      <div className="flex shrink-0 flex-wrap gap-2">
+        <Button variant="ghost" size="sm" asChild>
+          <Link href={`/workers/${workerId}?tab=performance`}>Past reviews</Link>
+        </Button>
+        <GenerateReviewButton workerId={workerId} workerName={workerName} size="sm" label={`Review v${active.version}`} />
       </div>
     </div>
   );

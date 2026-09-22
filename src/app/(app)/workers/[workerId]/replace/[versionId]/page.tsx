@@ -16,6 +16,7 @@ import { getReplacePageData, type ReplacePageView } from "@/server/queries/worke
 import { ChangeList } from "./_components/change-list";
 import { FailureAnalysis } from "./_components/failure-analysis";
 import { ReplaceDecision } from "./_components/replace-decision";
+import { impactDescription, replaceCrumb, replacePageTitle, targetNoun } from "./_components/replace-labels";
 import { EstimatedDeltas, VersionCompareCard } from "./_components/version-compare";
 
 interface PageProps {
@@ -33,10 +34,9 @@ const loadPage = cache(async (workerId: string, versionId: string): Promise<Repl
   }
 });
 
+/** Depends on the decision too: after the hire the same URL shows the adopted version, not a proposal. */
 function pageTitle(data: ReplacePageView): string {
-  if (data.changeReason === "REPLACEMENT") return `Proposed replacement for ${data.worker.name}`;
-  if (data.changeReason === "SPEC_CHANGE") return `Proposed change to how ${data.worker.name} works`;
-  return `${data.worker.name} · version ${data.target.version}`;
+  return replacePageTitle({ workerName: data.worker.name, changeReason: data.changeReason, status: data.target.status, version: data.target.version });
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
@@ -51,7 +51,9 @@ export default async function ReplacePage({ params }: PageProps) {
   if (!data) notFound();
 
   const { worker, target, base } = data;
-  const crumb = data.changeReason === "REPLACEMENT" ? "Proposed replacement" : data.changeReason === "SPEC_CHANGE" ? "Proposed change" : `Version ${target.version}`;
+  const labelInput = { changeReason: data.changeReason, status: target.status, version: target.version };
+  const crumb = replaceCrumb(labelInput);
+  const targetSide = targetNoun(labelInput);
   const baseLabel = base ? (base.status === "ACTIVE" ? "the current version" : `version ${base.version}`) : "nothing";
   const targetLabel = `Version ${target.version}`;
 
@@ -86,7 +88,7 @@ export default async function ReplacePage({ params }: PageProps) {
         {!data.canDecide ? <OutcomeBanner data={data} /> : null}
 
         {data.deltas ? (
-          <Section title="Estimated impact" description={data.deltas.source === "analysis" ? "What the analysis expects once the replacement is hired." : "Derived from the two cost estimates."}>
+          <Section title="Estimated impact" description={impactDescription(data.deltas.source, target.status)}>
             <EstimatedDeltas deltas={data.deltas} base={base} target={target} />
           </Section>
         ) : null}
@@ -95,7 +97,14 @@ export default async function ReplacePage({ params }: PageProps) {
           <div className="space-y-8 lg:col-span-2">
             {data.analysis ? <FailureAnalysis analysis={data.analysis} workerName={worker.name} /> : null}
 
-            <Section title="Side by side" description={base ? `${baseLabel[0].toUpperCase()}${baseLabel.slice(1)} on the left, the proposal on the right. Highlights mark what changes.` : "The design as proposed."}>
+            <Section
+              title="Side by side"
+              description={
+                base
+                  ? `${baseLabel[0].toUpperCase()}${baseLabel.slice(1)} on the left, ${targetSide} on the right. Highlights mark what ${target.status === "PROPOSED" ? "changes" : "changed"}.`
+                  : "The design as proposed."
+              }
+            >
               <div className={cn("grid gap-4", base && "md:grid-cols-2")}>
                 {base ? <VersionCompareCard card={base} against={target} role="base" changeReason={data.changeReason} /> : null}
                 <VersionCompareCard card={target} against={base} role="target" changeReason={data.changeReason} />
@@ -103,7 +112,10 @@ export default async function ReplacePage({ params }: PageProps) {
             </Section>
 
             {base ? (
-              <Section title="What changes" description={`Every difference between ${baseLabel} and ${targetLabel.toLowerCase()}, in plain terms.`}>
+              <Section
+                title={target.status === "PROPOSED" ? "What changes" : "What changed"}
+                description={`Every difference between ${baseLabel} and ${targetLabel.toLowerCase()}, in plain terms.`}
+              >
                 <ChangeList entries={data.diff} baseLabel={baseLabel} targetLabel={targetLabel} />
               </Section>
             ) : null}

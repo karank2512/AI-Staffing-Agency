@@ -15,6 +15,7 @@ import { formatDuration, formatUsd } from "@/lib/format";
 import { statusLabel } from "@/lib/status";
 import { requireSession } from "@/server/auth";
 import { isRunStatus, listRuns, listRunWorkers } from "@/server/queries/runs";
+import { isTerminal } from "@/server/runtime/types";
 import { FilterChips, withParams } from "./_components/filter-chips";
 import { TRIGGER_LABEL } from "./[runId]/_components/step-meta";
 
@@ -125,7 +126,11 @@ export default async function RunsPage({ searchParams }: { searchParams: Promise
                       <TableCell className="text-muted-foreground">
                         <RelativeTime iso={r.createdAt} />
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">{formatDuration(r.durationMs)}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatDuration(r.durationMs)}
+                        {/* Not final yet: the running total from the checkpoint. */}
+                        {r.durationMs !== null && !isTerminal(r.status) ? <span className="text-muted-foreground"> so far</span> : null}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">{formatUsd(r.costUsd)}</TableCell>
                       <TableCell className="pr-6">
                         {r.deliverable ? (

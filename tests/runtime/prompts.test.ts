@@ -5,6 +5,11 @@ import { compact, oneLine } from "@/server/runtime/compact";
 import { narrativeSummary, renderTitle } from "@/server/runtime/deliverable";
 import { parseJsonAnswer } from "@/server/runtime/json";
 import { buildInitialMessage, buildSystemPrompt } from "@/server/runtime/messages";
+import * as runtime from "@/server/runtime";
+import { DECLINED_MESSAGE } from "@/server/runtime/approvals";
+import { runDeterministic } from "@/server/runtime/deterministic";
+import { deliverableSummary } from "@/server/runtime/summary";
+import { repairPrompt } from "@/server/runtime/messages";
 import { parseAgentInput, readStructuredInputs } from "@/server/simulation/brain/input";
 import { makeBlueprint } from "../helpers/fixtures";
 
@@ -86,6 +91,28 @@ describe("runtime: final-answer JSON parsing", () => {
     expect(parseJsonAnswer("I could not find anything.")).toMatchObject({ ok: false, error: expect.stringContaining("no valid JSON") });
     expect(parseJsonAnswer("[{ broken")).toMatchObject({ ok: false });
   });
+
+  it("finds the fenced JSON block even when the prose before it contains brackets", () => {
+    const answer = 'Based on 3 sources [1], here are the rounds:\n\n```json\n[{"company":"Acme","stage":"Seed"}]\n```\n\nSee [2] for more.';
+    expect(parseJsonAnswer(answer)).toEqual({ ok: true, value: [{ company: "Acme", stage: "Seed" }] });
+  });
+
+  it("prefers a list of records over a citation-like bracket in unfenced prose", () => {
+    const answer = 'Per [1] and [2], the rounds are [{"company":"Acme"},{"company":"Borealis"}] (details in {3}).';
+    expect(parseJsonAnswer(answer)).toEqual({ ok: true, value: [{ company: "Acme" }, { company: "Borealis" }] });
+    expect(parseJsonAnswer('Two lists: [{"a":1}] and the longer [{"a":1},{"a":2}]')).toEqual({ ok: true, value: [{ a: 1 }, { a: 2 }] });
+  });
+
+  it("treats a bare JSON scalar as unusable so the repair turn runs", () => {
+    expect(parseJsonAnswer('"No funding rounds found"')).toMatchObject({ ok: false, error: expect.stringContaining("single JSON value") });
+    expect(parseJsonAnswer("42")).toMatchObject({ ok: false });
+    expect(parseJsonAnswer("null")).toMatchObject({ ok: false });
+  });
+
+  it("still accepts an empty list and brackets inside JSON strings", () => {
+    expect(parseJsonAnswer("[]")).toEqual({ ok: true, value: [] });
+    expect(parseJsonAnswer('Result: [{"note":"see [1] and {x}"}]')).toEqual({ ok: true, value: [{ note: "see [1] and {x}" }] });
+  });
 });
 
 describe("runtime: deliverable helpers", () => {
@@ -121,5 +148,24 @@ describe("runtime: checkpoint + trace compaction", () => {
     expect((out.list as unknown[]).at(-1)).toBe("…[40 more items]");
     expect(out.nested).toEqual({ keep: 1 });
     expect(oneLine("  many \n\n lines   here ", 10)).toBe("many line…");
+  });
+});
+
+describe("runtime: public surface", () => {
+  it("re-exports the pure helpers the demo seed replays runs with (the same functions, not copies)", () => {
+    expect(runtime.compact).toBe(compact);
+    expect(runtime.oneLine).toBe(oneLine);
+    expect(runtime.narrativeSummary).toBe(narrativeSummary);
+    expect(runtime.renderTitle).toBe(renderTitle);
+    expect(runtime.deliverableSummary).toBe(deliverableSummary);
+    expect(runtime.DECLINED_MESSAGE).toBe(DECLINED_MESSAGE);
+    expect(runtime.runDeterministic).toBe(runDeterministic);
+    expect(runtime.buildInitialMessage).toBe(buildInitialMessage);
+    expect(runtime.buildSystemPrompt).toBe(buildSystemPrompt);
+    expect(runtime.repairPrompt).toBe(repairPrompt);
+    // The existing surface is still there.
+    for (const name of ["enqueueRun", "claimNextRun", "executeRun", "cancelRun", "decideApproval", "tickScheduler", "startExecutor"] as const) {
+      expect(typeof runtime[name]).toBe("function");
+    }
   });
 });

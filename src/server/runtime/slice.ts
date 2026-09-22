@@ -6,8 +6,8 @@ import { cloneContext } from "./checkpoint";
 import type { RunBundle } from "./context";
 import { ensureDeliverable } from "./deliverable";
 import { runDeterministicStep } from "./deterministic-step";
-import { LockLost, toRunFailure } from "./failure";
-import { finishFailure, finishSuccess } from "./finish";
+import { LockLost, RunCancelled, toRunFailure, WORKER_RETIRED_REASON } from "./failure";
+import { finishCancelled, finishFailure, finishSuccess } from "./finish";
 import { enforceLimits } from "./limits";
 import type { RunLock } from "./lock";
 import { StepWriter } from "./steps";
@@ -81,6 +81,16 @@ export class RunSlice {
     return { organizationId, workerId, workerVersionId, runId, attempt, simulated, getSecret: (name) => resolveSecret(organizationId, name) };
   }
 
+  /**
+   * A retired worker's run can never be claimed again (claimNextRun only serves ACTIVE workers), so it must not be
+   * parked in QUEUED or WAITING_FOR_APPROVAL. Checked at component boundaries, before an approval pause and before
+   * a retry. A PAUSED worker is fine: its runs wait for the resume.
+   */
+  async assertWorkerNotRetired(): Promise<void> {
+    const worker = await db.worker.findUnique({ where: { id: this.run.workerId }, select: { status: true } });
+    if (!worker || worker.status === "RETIRED") throw new RunCancelled(WORKER_RETIRED_REASON);
+  }
+
   /** Leftovers of a dead slice can never complete; mark them so the trace is honest and nothing looks in flight. */
   async closeInterruptedWork(): Promise<void> {
     const pendingIds = (this.cp.agent?.pendingToolCalls ?? []).map((p) => p.toolCallId);
@@ -106,6 +116,7 @@ export class RunSlice {
       const { components } = this.blueprint;
       while (this.cp.componentIndex < components.length) {
         await this.lock.assertHeld();
+        await this.assertWorkerNotRetired();
         await this.enforceLimits();
         const component = components[this.cp.componentIndex];
         this.componentStart = { index: this.cp.componentIndex, context: cloneContext(this.cp.context) };
@@ -129,6 +140,7 @@ export class RunSlice {
       return await finishSuccess(this);
     } catch (e) {
       if (e instanceof LockLost) throw e;
+      if (e instanceof RunCancelled) return await finishCancelled(this, e.reason);
       return await finishFailure(this, toRunFailure(e));
     }
   }

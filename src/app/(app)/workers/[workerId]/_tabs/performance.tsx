@@ -7,6 +7,7 @@ import {
   ClipboardList,
   Clock,
   Gauge,
+  History,
   ListChecks,
   MinusCircle,
   Rows3,
@@ -28,9 +29,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { formatDate, formatDuration, formatNumber, formatPercent, formatUsdPrecise, pluralize } from "@/lib/format";
 import { SCORE_BAND_CLASSES, scoreBand, TONE_CLASSES } from "@/lib/status";
 import { cn } from "@/lib/utils";
-import { getWorkerPerformance, type WorkerReviewRow } from "@/server/queries/worker-profile";
+import { getWorkerPerformance, type ActiveVersionRef, type WorkerReviewRow } from "@/server/queries/worker-profile";
+import { GenerateReviewButton } from "../_components/generate-review";
 import { describeScore, formatKpiValue, kpiVerdict } from "../_components/kpi-format";
-import { evaluationHint, evaluationLabel, RECOMMENDATION_META } from "../_components/labels";
+import { beforeChangeLabel, evaluationHint, evaluationLabel, RECOMMENDATION_META } from "../_components/labels";
 import { PerformanceChart } from "./performance-chart";
 import type { WorkerTabProps } from "./types";
 
@@ -52,6 +54,10 @@ export default async function PerformanceTab({ session, workerId, workerName }: 
   const data = await getWorkerPerformance(session.organizationId, workerId);
   const { score, metrics } = data;
   const band = SCORE_BAND_CLASSES[scoreBand(score.score)];
+  const active = data.activeVersion;
+  // Reviews are newest first; after a replacement the old verdicts stay visible, but only as history.
+  const latestCurrentId = data.reviews.find((r) => r.forCurrentVersion)?.id ?? null;
+  const onlyHistory = active !== null && data.reviews.length > 0 && latestCurrentId === null;
 
   return (
     <>
@@ -150,21 +156,44 @@ export default async function PerformanceTab({ session, workerId, workerName }: 
           <div className="flex flex-wrap items-end justify-between gap-2">
             <div>
               <h2 className="text-[15px] leading-6 font-semibold tracking-tight">Performance reviews</h2>
-              <p className="text-[13px] text-muted-foreground">
-                A written review of {workerName}&apos;s recent work with a keep / improve / replace call. Generate one from the header.
-              </p>
+              <p className="text-[13px] text-muted-foreground">A written review of {workerName}&apos;s recent work with a keep / improve / replace call.</p>
             </div>
+            {data.reviews.length > 0 && !onlyHistory ? (
+              <GenerateReviewButton workerId={workerId} workerName={workerName} size="sm" label="New review" disabled={!active} />
+            ) : null}
           </div>
           {data.reviews.length === 0 ? (
             <EmptyState
               icon={ClipboardList}
               title="No reviews yet"
-              description={`Use "Performance review" above to have ${workerName}'s recent work assessed.`}
+              description={`Have ${workerName}'s recent work assessed: a score, strengths, problems and a keep / improve / replace call.`}
+              action={active ? <GenerateReviewButton workerId={workerId} workerName={workerName} /> : null}
             />
           ) : (
             <div className="space-y-4">
-              {data.reviews.map((review, index) => (
-                <ReviewCard key={review.id} review={review} workerId={workerId} workerName={workerName} latest={index === 0} />
+              {onlyHistory && active ? (
+                <EmptyState
+                  icon={History}
+                  title={`No review of v${active.version} yet`}
+                  description={
+                    <>
+                      The reviews below were written about earlier versions. {workerName} has worked as v{active.version}
+                      {active.activatedAt ? ` since ${formatDate(active.activatedAt)}` : ""} — review it once it has a few runs behind it.
+                    </>
+                  }
+                  action={<GenerateReviewButton workerId={workerId} workerName={workerName} label={`Review v${active.version}`} />}
+                  className="py-8"
+                />
+              ) : null}
+              {data.reviews.map((review) => (
+                <ReviewCard
+                  key={review.id}
+                  review={review}
+                  workerId={workerId}
+                  workerName={workerName}
+                  latest={review.id === latestCurrentId}
+                  active={active}
+                />
               ))}
             </div>
           )}
@@ -290,17 +319,30 @@ export default async function PerformanceTab({ session, workerId, workerName }: 
   );
 }
 
-function ReviewCard({ review, workerId, workerName, latest }: { review: WorkerReviewRow; workerId: string; workerName: string; latest: boolean }) {
+function ReviewCard({
+  review,
+  workerId,
+  workerName,
+  latest,
+  active,
+}: {
+  review: WorkerReviewRow;
+  workerId: string;
+  workerName: string;
+  latest: boolean;
+  active: ActiveVersionRef | null;
+}) {
   const meta = RECOMMENDATION_META[review.recommendation];
   const tone = TONE_CLASSES[meta.tone];
+  const historical = !review.forCurrentVersion;
   return (
-    <Card id={latest ? "latest-review" : undefined}>
+    <Card id={latest ? "latest-review" : undefined} className={cn(historical && "bg-muted/30")}>
       <CardHeader>
         <div className="flex items-start gap-4">
           <ScoreRing score={review.overallScore} size={48} />
           <div className="min-w-0 flex-1">
             <CardTitle className="flex flex-wrap items-center gap-2">
-              {meta.headline(workerName)}
+              {historical ? `Review of v${review.version} (${beforeChangeLabel(active?.changeReason)})` : meta.headline(workerName)}
               <span className={cn("inline-flex h-5.5 items-center rounded-full border px-2 text-xs font-medium", tone.badge)}>{meta.label}</span>
               {latest ? <Badge variant="secondary">Latest</Badge> : null}
             </CardTitle>
@@ -342,23 +384,38 @@ function ReviewCard({ review, workerId, workerName, latest }: { review: WorkerRe
             ) : null}
           </div>
         ) : null}
-        <div className={cn("flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center", tone.badge)}>
-          <p className="min-w-0 flex-1 text-sm text-pretty">
-            <span className="font-semibold">Recommendation: {meta.label}.</span> {review.recommendationDetail}
-          </p>
-          {review.recommendation === "REPLACE" ? (
-            <Button size="sm" className="shrink-0" asChild>
-              <Link href={`/workers/${workerId}?tab=versions#replace`}>
-                <ArrowLeftRight aria-hidden="true" />
-                Propose replacement
-              </Link>
-            </Button>
-          ) : review.recommendation === "IMPROVE" ? (
-            <Button variant="outline" size="sm" className="shrink-0 bg-white" asChild>
-              <Link href={`/workers/${workerId}?tab=chat`}>Talk to {workerName}</Link>
-            </Button>
-          ) : null}
-        </div>
+        {historical ? (
+          // The call was about a version that no longer runs — keep it readable, but without a call-to-action.
+          <div className="rounded-lg border border-dashed p-3 text-sm text-pretty text-muted-foreground">
+            <p>
+              <span className="font-semibold text-foreground">Recommendation for v{review.version}: {meta.label}.</span> {review.recommendationDetail}
+            </p>
+            {active ? (
+              <p className="mt-1.5 text-xs">
+                {workerName} has worked as v{active.version}
+                {active.activatedAt ? ` since ${formatDate(active.activatedAt)}` : ""}, so this call no longer applies.
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <div className={cn("flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center", tone.badge)}>
+            <p className="min-w-0 flex-1 text-sm text-pretty">
+              <span className="font-semibold">Recommendation: {meta.label}.</span> {review.recommendationDetail}
+            </p>
+            {review.recommendation === "REPLACE" ? (
+              <Button size="sm" className="shrink-0" asChild>
+                <Link href={`/workers/${workerId}?tab=versions#replace`}>
+                  <ArrowLeftRight aria-hidden="true" />
+                  Propose replacement
+                </Link>
+              </Button>
+            ) : review.recommendation === "IMPROVE" ? (
+              <Button variant="outline" size="sm" className="shrink-0 bg-white" asChild>
+                <Link href={`/workers/${workerId}?tab=chat`}>Talk to {workerName}</Link>
+              </Button>
+            ) : null}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

@@ -1,7 +1,7 @@
 import type { AgentComponent, JobSpec, WorkerBlueprint } from "@/server/domain";
 import { renderJobBrief } from "@/server/domain";
 import type { ChatMessage, ToolCallRequest } from "@/server/models/types";
-import { repairPrompt } from "@/server/runtime/messages";
+import { repairPrompt } from "@/server/runtime";
 import { createSimulation } from "@/server/simulation";
 import type { ToolName } from "@/server/tools/schemas";
 import { emulateAgent, estimateTurnUsage, simulateTool, type EmulatedTurn, type EmulateRunArgs, type ToolExecution } from "./emulate";

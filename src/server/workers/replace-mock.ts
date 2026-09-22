@@ -1,6 +1,6 @@
 import type { AgentComponent, BlueprintChange, FailurePattern, JobSpec, ModelTier, ReplacementPlan, WorkerBlueprint } from "@/server/domain";
 import type { ReplacementEvidence } from "./replace-evidence";
-import { clip, plural, quote, requiredSpecFields } from "./shared";
+import { clip, formatKpiValue, plural, quote, requiredSpecFields } from "./shared";
 
 /**
  * Simulated-mode replacement plan. PURE and evidence-driven: every failure pattern quotes real counts and
@@ -74,7 +74,7 @@ export function failurePatternsFrom(evidence: ReplacementEvidence): FailurePatte
   if (e.kpiMisses.length > 0) {
     patterns.push({
       pattern: `${plural(e.kpiMisses.length, "KPI target")} missed`,
-      evidence: e.kpiMisses.map((k) => `${k.name} at ${k.actual ?? "n/a"} vs target ${k.target}${k.unit === "%" ? "" : ` ${k.unit}`}`.trim()).join("; "),
+      evidence: e.kpiMisses.map((k) => `${k.name} at ${formatKpiValue(k.actual, k.unit)} vs target ${formatKpiValue(k.target, k.unit)}`).join("; "),
       occurrences: e.kpiMisses.length,
       severity: "medium",
     });

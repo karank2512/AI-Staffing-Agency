@@ -16,7 +16,8 @@ const NOT_A_DURATION = "(?!\\s*(?:-\\s*)?(?:days?|weeks?|months?|hours?|years?|m
 const COUNT_PATTERNS: readonly RegExp[] = [
   new RegExp(`\\btop[-\\s]+${NUM}\\b${NOT_A_DURATION}`, "i"),
   new RegExp(`\\b(?:about|around|roughly|at least|up to|ideally|target(?:ing)?|~)\\s+${NUM}\\b${NOT_A_DURATION}`, "i"),
-  new RegExp(`\\b${NUM}\\s+(?:[a-z-]+\\s+){0,2}?${COUNTABLE}\\b`, "i"),
+  // Up to four modifiers between the number and the noun: "15 Series A fintech companies", "25 new outbound leads".
+  new RegExp(`\\b${NUM}\\b${NOT_A_DURATION}\\s+(?:[a-z][a-z–-]*\\s+){0,4}?${COUNTABLE}\\b`, "i"),
   new RegExp(`^\\s*${NUM}\\s*$`, "i"), // an answer that is just the number
 ];
 

@@ -2,6 +2,7 @@ import type { DeliverableFormat, DeliverableStatus, EvaluationType, RunStatus } 
 import Papa from "papaparse";
 import { db } from "@/server/db";
 import { EvaluationDetailsSchema, type EvaluationDetails } from "@/server/domain/evaluation";
+import { JobSpecSchema } from "@/server/domain/job-spec";
 import { notFound } from "@/server/errors";
 
 /**
@@ -55,6 +56,56 @@ export function rowsFor(format: DeliverableFormat, content: string, data: unknow
   return null;
 }
 
+/** Every key across the rows, in first-seen order. */
+function keysIn(rows: ReadonlyArray<Record<string, unknown>>): string[] {
+  const seen = new Set<string>();
+  for (const row of rows) for (const key of Object.keys(row)) seen.add(key);
+  return [...seen];
+}
+
+/** The header line of CSV text (trimmed, blanks dropped); [] when there is none. */
+export function csvHeader(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const first = Papa.parse<unknown[]>(trimmed, { preview: 1, skipEmptyLines: true }).data[0];
+  return Array.isArray(first) ? first.map((h) => String(h ?? "").trim()).filter(Boolean) : [];
+}
+
+/**
+ * Column order for a deliverable's record table. The stored `data` records come back from a Postgres jsonb column,
+ * which reorders object keys (shorter keys first, then alphabetical), so their key order means nothing. Preference:
+ *   CSV → the content's header line (what the downloaded file shows);
+ *   JSON → key order in the content text (JSON.parse keeps it);
+ *   otherwise (or when the content has no usable order) → the job spec's deliverable fields.
+ * A `rank` column the preferred order doesn't place goes first — rank_records stamps it on top of the spec's fields,
+ * and the worker's own CSV exports lead with it. Keys no preferred list mentions are appended in first-seen order;
+ * preferred keys no row has are dropped.
+ */
+export function columnsFor(
+  format: DeliverableFormat,
+  content: string,
+  rows: ReadonlyArray<Record<string, unknown>>,
+  specFields: readonly string[] = [],
+): string[] {
+  const present = keysIn(rows);
+  const has = new Set(present);
+  const fromContent = format === "CSV" ? csvHeader(content) : format === "JSON" ? keysIn(parseJsonRows(content) ?? []) : [];
+  let preferred = fromContent.filter((k) => has.has(k));
+  if (preferred.length === 0) preferred = specFields.filter((k) => has.has(k));
+  if (has.has("rank") && !preferred.includes("rank")) preferred = ["rank", ...preferred];
+
+  const ordered = [...new Set(preferred)];
+  const placed = new Set(ordered);
+  for (const key of present) if (!placed.has(key)) ordered.push(key);
+  return ordered;
+}
+
+/** Field names the job spec asked each record to have, in the spec's order ([] when the spec doesn't parse). */
+function specFieldNames(spec: unknown): string[] {
+  const parsed = JobSpecSchema.safeParse(spec);
+  return parsed.success ? parsed.data.deliverable.fields.map((f) => f.name) : [];
+}
+
 // ── Detail ──────────────────────────────────────────────────────────────────
 
 export interface DeliverableEvaluationView {
@@ -77,6 +128,8 @@ export interface DeliverableDetail {
   content: string;
   /** Tabular rows for CSV/JSON deliverables (or any deliverable with stored records). */
   rows: Array<Record<string, unknown>> | null;
+  /** Display order for `rows` (see `columnsFor`); null when there are no rows. Pass to DataTable `columns`. */
+  columns: string[] | null;
   recordCount: number | null;
   feedback: string | null;
   reviewedByName: string | null;
@@ -101,7 +154,7 @@ export async function getDeliverableDetail(organizationId: string, deliverableId
       worker: { select: { id: true, name: true, title: true, avatarColor: true } },
       job: { select: { id: true, title: true } },
       run: { select: { id: true, status: true, simulated: true, finishedAt: true } },
-      workerVersion: { select: { id: true, version: true } },
+      workerVersion: { select: { id: true, version: true, jobSpec: { select: { spec: true } } } },
       evaluations: { orderBy: { createdAt: "asc" } },
     },
   });
@@ -111,6 +164,7 @@ export async function getDeliverableDetail(organizationId: string, deliverableId
     ? await db.user.findFirst({ where: { id: d.reviewedById, organizationId }, select: { name: true } })
     : null;
   const rows = rowsFor(d.format, d.content, d.data);
+  const columns = rows ? columnsFor(d.format, d.content, rows, specFieldNames(d.workerVersion.jobSpec.spec)) : null;
 
   return {
     id: d.id,
@@ -120,6 +174,7 @@ export async function getDeliverableDetail(organizationId: string, deliverableId
     status: d.status,
     content: d.content,
     rows,
+    columns,
     recordCount: Array.isArray(d.data) ? d.data.length : (rows?.length ?? null),
     feedback: d.feedback,
     reviewedByName: reviewer?.name ?? null,
@@ -128,7 +183,7 @@ export async function getDeliverableDetail(organizationId: string, deliverableId
     worker: d.worker,
     job: d.job,
     run: { id: d.run.id, status: d.run.status, simulated: d.run.simulated, finishedAt: iso(d.run.finishedAt) },
-    version: d.workerVersion,
+    version: { id: d.workerVersion.id, version: d.workerVersion.version },
     evaluations: d.evaluations.map((e) => ({
       id: e.id,
       type: e.type,

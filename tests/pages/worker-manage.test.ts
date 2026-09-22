@@ -11,6 +11,13 @@ import {
   replaceHref,
 } from "@/server/queries/worker-manage";
 import { hireReplacement, proposeReplacement, rejectProposedVersion, sendMessageToWorker, updateToolGrant } from "@/server/workers";
+import {
+  impactDescription,
+  replaceCrumb,
+  replacePageTitle,
+  targetCardHeading,
+  targetNoun,
+} from "@/app/(app)/workers/[workerId]/replace/[versionId]/_components/replace-labels";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker } from "../helpers/fixtures";
 import { createDeliverable, createJudgeEvaluation, createRun, daysAgo, records, type Hired, type TestOrg } from "../workers/helpers";
@@ -293,6 +300,14 @@ describe("worker-manage queries", () => {
       expect(after.base?.id).toBe(hired.version.id);
       expect(after.base?.status).toBe("REPLACED");
 
+      // Feed and Versions-tab links keep landing here after the hire, so the wording must say what happened.
+      const hiredLabels = { changeReason: after.changeReason, status: after.target.status, version: after.target.version };
+      expect(replacePageTitle({ workerName: after.worker.name, ...hiredLabels })).toBe("Alex · version 2 (replacement)");
+      expect(replaceCrumb(hiredLabels)).toBe("Version 2");
+      expect(targetCardHeading(hiredLabels)).toBe("Replacement");
+      expect(targetNoun(hiredLabels)).toBe("the replacement");
+      expect(impactDescription("analysis", after.target.status)).not.toMatch(/once the replacement is hired/);
+
       const stranger = await createHiredWorker(t.organization.id, { userId: t.user.id, name: "Maya" });
       await expect(getReplacePageData(t.organization.id, stranger.worker.id, versionId)).rejects.toMatchObject({ code: "NOT_FOUND" });
       await expect(getReplacePageData(t.organization.id, hired.worker.id, "missing")).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -306,6 +321,41 @@ describe("worker-manage queries", () => {
       expect(spec.base?.id).toBe(versionId);
       expect(spec.target.scheduleLabel).toBe("Daily at 8am");
       expect(spec.diff.some((e) => e.path === "schedule")).toBe(true);
+    });
+  });
+
+  describe("replace page labels", () => {
+    const v = (changeReason: "REPLACEMENT" | "SPEC_CHANGE" | "MANUAL", status: "PROPOSED" | "ACTIVE" | "REPLACED" | "REJECTED", version = 2) => ({
+      changeReason,
+      status,
+      version,
+    });
+
+    it("reads as a proposal only while the version is undecided", () => {
+      expect(replacePageTitle({ workerName: "Sam", ...v("REPLACEMENT", "PROPOSED") })).toBe("Proposed replacement for Sam");
+      expect(replacePageTitle({ workerName: "Sam", ...v("REPLACEMENT", "ACTIVE") })).toBe("Sam · version 2 (replacement)");
+      expect(replacePageTitle({ workerName: "Sam", ...v("REPLACEMENT", "REPLACED") })).toBe("Sam · version 2 (replacement)");
+      expect(replacePageTitle({ workerName: "Sam", ...v("REPLACEMENT", "REJECTED") })).toBe("Declined replacement for Sam");
+      expect(replacePageTitle({ workerName: "Sam", ...v("SPEC_CHANGE", "PROPOSED", 3) })).toBe("Proposed change to how Sam works");
+      expect(replacePageTitle({ workerName: "Sam", ...v("SPEC_CHANGE", "ACTIVE", 3) })).toBe("Sam · version 3 (changed)");
+      expect(replacePageTitle({ workerName: "Sam", ...v("SPEC_CHANGE", "REJECTED", 3) })).toBe("Declined change to how Sam works");
+      expect(replacePageTitle({ workerName: "Sam", ...v("MANUAL", "ACTIVE", 4) })).toBe("Sam · version 4");
+    });
+
+    it("keeps the crumb, card heading, noun and impact tense in step with the title", () => {
+      expect(replaceCrumb(v("REPLACEMENT", "PROPOSED"))).toBe("Proposed replacement");
+      expect(replaceCrumb(v("REPLACEMENT", "ACTIVE"))).toBe("Version 2");
+      expect(replaceCrumb(v("SPEC_CHANGE", "REJECTED", 3))).toBe("Declined change");
+      expect(targetCardHeading(v("REPLACEMENT", "PROPOSED"))).toBe("Proposed replacement");
+      expect(targetCardHeading(v("SPEC_CHANGE", "ACTIVE", 3))).toBe("Changed version");
+      expect(targetCardHeading(v("MANUAL", "ACTIVE", 4))).toBe("Version 4");
+      expect(targetNoun(v("REPLACEMENT", "PROPOSED"))).toBe("the proposal");
+      expect(targetNoun(v("REPLACEMENT", "REJECTED"))).toBe("the proposal");
+      expect(targetNoun(v("SPEC_CHANGE", "REPLACED", 3))).toBe("the changed version");
+      expect(impactDescription("analysis", "PROPOSED")).toBe("What the analysis expects once the replacement is hired.");
+      expect(impactDescription("analysis", "ACTIVE")).toMatch(/expected .* before it was hired/);
+      expect(impactDescription("analysis", "REJECTED")).toMatch(/had been hired/);
+      expect(impactDescription("estimate", "ACTIVE")).toBe("Derived from the two cost estimates.");
     });
   });
 });

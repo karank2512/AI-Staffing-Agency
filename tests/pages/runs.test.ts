@@ -4,7 +4,9 @@ import { AppError } from "@/server/errors";
 import { recordDeliverableFeedback } from "@/server/evaluation";
 import { decideApproval, enqueueRun, executeRun } from "@/server/runtime";
 import {
+  columnsFor,
   countDeliverables,
+  csvHeader,
   getDeliverableDetail,
   getDeliverableFile,
   listDeliverableWorkers,
@@ -14,7 +16,8 @@ import {
   rowsFor,
   slugifyFilename,
 } from "@/server/queries/deliverables";
-import { EVALUATION_GRACE_MS, getRunDetail, getRunLiveView, isEvaluationPending, isRunStatus, listRunWorkers, listRuns } from "@/server/queries/runs";
+import { EVALUATION_GRACE_MS, activeTimeMs, getRunDetail, getRunLiveView, isEvaluationPending, isRunStatus, listRunWorkers, listRuns } from "@/server/queries/runs";
+import { buildDataTableModel } from "@/lib/cell-format";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker } from "../helpers/fixtures";
 
@@ -89,6 +92,47 @@ describe("pages/runs: pure helpers", () => {
     expect(rowsFor("JSON", "[]", null)).toBeNull();
   });
 
+  it("activeTimeMs: the final duration wins; otherwise the checkpoint's running total, read defensively", () => {
+    expect(activeTimeMs(4_200, { counters: { activeMs: 9_999 } })).toBe(4_200);
+    expect(activeTimeMs(0, null)).toBe(0);
+    expect(activeTimeMs(null, { counters: { activeMs: 1_234.6 } })).toBe(1_235);
+    // Nothing done yet, or nothing usable to read → still unknown.
+    expect(activeTimeMs(null, { counters: { activeMs: 0 } })).toBeNull();
+    expect(activeTimeMs(null, null)).toBeNull();
+    expect(activeTimeMs(null, undefined)).toBeNull();
+    expect(activeTimeMs(null, "garbage")).toBeNull();
+    expect(activeTimeMs(null, { counters: null })).toBeNull();
+    expect(activeTimeMs(null, { counters: { activeMs: "12" } })).toBeNull();
+    expect(activeTimeMs(null, { counters: { activeMs: Number.NaN } })).toBeNull();
+    expect(activeTimeMs(null, { version: 1 })).toBeNull();
+  });
+
+  it("columnsFor: CSV header, JSON text order or spec fields — never the jsonb key order of stored records", () => {
+    // Stored records as Postgres jsonb hands them back: shorter keys first, then alphabetical.
+    const jsonbRow = { hq: "Austin, TX", rank: 1, stage: "Series B", company: "Halcyon", category: "GPU Cloud", amount_usd: 85_000_000, source_url: "https://x.example" };
+    const csv = "rank,company,category,stage,amount_usd,hq,source_url\n1,Halcyon,GPU Cloud,Series B,85000000,\"Austin, TX\",https://x.example\n";
+    expect(csvHeader(csv)).toEqual(["rank", "company", "category", "stage", "amount_usd", "hq", "source_url"]);
+    expect(csvHeader("  \n")).toEqual([]);
+    expect(columnsFor("CSV", csv, [jsonbRow])).toEqual(["rank", "company", "category", "stage", "amount_usd", "hq", "source_url"]);
+
+    // Markdown: the spec's field order, with the ranking the worker added up front and unknown extras at the end.
+    const spec = ["company", "category", "stage", "amount_usd", "lead_investor", "source_url"];
+    expect(columnsFor("MARKDOWN", "# Report", [jsonbRow], spec)).toEqual(["rank", "company", "category", "stage", "amount_usd", "source_url", "hq"]);
+    // A spec that names `rank` itself keeps it where the spec put it.
+    expect(columnsFor("MARKDOWN", "# Report", [jsonbRow], ["company", "rank"])).toEqual(["company", "rank", "hq", "stage", "category", "amount_usd", "source_url"]);
+
+    // JSON: key order as written in the content (JSON.parse keeps it), stored order ignored.
+    const json = JSON.stringify([{ company: "Halcyon", stage: "Series B", rank: 1 }]);
+    expect(columnsFor("JSON", json, [{ rank: 1, stage: "Series B", company: "Halcyon" }])).toEqual(["company", "stage", "rank"]);
+    expect(columnsFor("JSON", JSON.stringify({ records: [{ b: 1, a: 2 }] }), [{ a: 2, b: 1 }])).toEqual(["b", "a"]);
+
+    // A CSV header that doesn't match the records falls back to the spec; keys missing from every row are dropped.
+    expect(columnsFor("CSV", "Company,Stage\nA,B", [{ stage: "B", company: "A" }], ["company", "stage", "amount_usd"])).toEqual(["company", "stage"]);
+    // Nothing to go on: first-seen order, still rank first.
+    expect(columnsFor("MARKDOWN", "", [{ hq: "x", rank: 2 }, { hq: "y", rank: 1, extra: true }])).toEqual(["rank", "hq", "extra"]);
+    expect(columnsFor("MARKDOWN", "", [])).toEqual([]);
+  });
+
   it("slugifyFilename produces safe ASCII filenames", () => {
     expect(slugifyFilename("Weekly AI Infra Funding Report — 2026-09-17")).toBe("weekly-ai-infra-funding-report-2026-09-17");
     expect(slugifyFilename("Café résumé!")).toBe("cafe-resume");
@@ -146,6 +190,13 @@ describe("pages/runs: live view + detail over a real run", () => {
     expect(waiting).toMatchObject({ status: "WAITING" });
     expect(waiting).not.toHaveProperty("input");
     expect(live.steps.some((s) => s.kind === "DELIVERABLE" && s.status === "SUCCEEDED")).toBe(true);
+    // Paused, so Run.durationMs isn't written yet — the page shows the checkpoint's active time so far.
+    const stored = await db.run.findUniqueOrThrow({ where: { id: runId }, select: { durationMs: true, checkpoint: true } });
+    expect(stored.durationMs).toBeNull();
+    const activeMs = (stored.checkpoint as { counters: { activeMs: number } }).counters.activeMs;
+    expect(activeMs).toBeGreaterThan(0);
+    expect(live.run.durationMs).toBe(Math.round(activeMs));
+    expect((await listRuns(t.organization.id)).find((r) => r.id === runId)?.durationMs).toBe(Math.round(activeMs));
 
     const detail = await getRunDetail(t.organization.id, runId);
     expect(detail.live).toEqual(live);
@@ -231,6 +282,12 @@ describe("pages/runs: live view + detail over a real run", () => {
     expect(before.content.length).toBeGreaterThan(50);
     expect(before.rows?.length).toBeGreaterThan(0);
     expect(before.recordCount).toBe(before.rows?.length);
+    // Markdown report: the underlying-records table follows the spec's field order (rank first), not jsonb's.
+    const specFields = hired.spec.deliverable.fields.map((f) => f.name);
+    const keys = new Set(before.rows!.flatMap((r) => Object.keys(r)));
+    const expectedLead = [...(keys.has("rank") ? ["rank"] : []), ...specFields.filter((f) => keys.has(f))];
+    expect(before.columns?.slice(0, expectedLead.length)).toEqual(expectedLead);
+    expect([...before.columns!].sort()).toEqual([...keys].sort());
     expect(before.worker).toMatchObject({ id: hired.worker.id, name: hired.worker.name });
     expect(before.run).toMatchObject({ id: runId, status: "SUCCEEDED", simulated: true });
     expect(before.version).toMatchObject({ id: hired.version.id, version: 1 });
@@ -346,6 +403,7 @@ describe("pages/runs: evaluationPending on hand-written runs", () => {
     // CSV without stored data is parsed into rows for the table; the file keeps the raw text.
     const detail = await getDeliverableDetail(t.organization.id, deliverable.id);
     expect(detail.rows).toEqual([{ company: "Acme", amount: 10 }]);
+    expect(detail.columns).toEqual(["company", "amount"]);
     expect(detail.status).toBe("ACCEPTED");
     const file = await getDeliverableFile(t.organization.id, deliverable.id);
     expect(file).toMatchObject({ filename: "report.csv", content: "company,amount\nAcme,10\n" });
@@ -354,6 +412,97 @@ describe("pages/runs: evaluationPending on hand-written runs", () => {
     // Per-deliverable score on the index blends only the automated verdicts.
     const listed = await listDeliverables(t.organization.id, { status: "ACCEPTED" });
     expect(listed.find((d) => d.id === deliverable.id)?.score).toBe(75);
+  });
+
+  it("a CSV deliverable with stored records shows its columns in the CSV's order, not jsonb's", async () => {
+    const run = await createRun(t, hired, { status: "SUCCEEDED" });
+    const records = [
+      { rank: 1, company: "Ridgeline GPU", category: "GPU Cloud", stage: "Series C", amount_usd: 210_000_000, hq: "Denver, CO", source_url: "https://news.example/a" },
+      { rank: 2, company: "Latchkey AI", category: "Inference", stage: "Series B", amount_usd: 72_000_000, hq: "San Francisco, CA", source_url: "https://news.example/b" },
+    ];
+    const header = "rank,company,category,stage,amount_usd,hq,source_url";
+    const deliverable = await db.deliverable.create({
+      data: {
+        organizationId: t.organization.id,
+        jobId: hired.job.id,
+        workerId: hired.worker.id,
+        workerVersionId: hired.version.id,
+        runId: run.id,
+        title: "Funding rounds",
+        format: "CSV",
+        content: `${header}\n1,Ridgeline GPU,GPU Cloud,Series C,210000000,"Denver, CO",https://news.example/a\n2,Latchkey AI,Inference,Series B,72000000,"San Francisco, CA",https://news.example/b\n`,
+        data: toJson(records),
+      },
+    });
+    const detail = await getDeliverableDetail(t.organization.id, deliverable.id);
+    // The round trip through jsonb really does scramble the keys — which is why the order must come from elsewhere.
+    expect(Object.keys(detail.rows![0]!)).not.toEqual(header.split(","));
+    expect(detail.columns).toEqual(header.split(","));
+    expect(detail.recordCount).toBe(2);
+
+    // What the page's DataTable renders: the records number themselves, so no competing "#" column, and the
+    // headers keep their acronyms.
+    const table = buildDataTableModel({ rows: detail.rows, columns: detail.columns, showIndex: !detail.columns?.includes("rank") });
+    expect(table.headers.map((h) => h.label)).toEqual(["Rank", "Company", "Category", "Stage", "Amount USD", "HQ", "Source URL"]);
+  });
+
+  it("an unranked deliverable keeps the table's own row numbers", async () => {
+    const run = await createRun(t, hired, { status: "SUCCEEDED" });
+    const deliverable = await db.deliverable.create({
+      data: {
+        organizationId: t.organization.id,
+        jobId: hired.job.id,
+        workerId: hired.worker.id,
+        workerVersionId: hired.version.id,
+        runId: run.id,
+        title: "Vendors",
+        format: "CSV",
+        content: "vendor_name,hq,crm_id\nAcme,Austin,CRM-1\n",
+      },
+    });
+    const detail = await getDeliverableDetail(t.organization.id, deliverable.id);
+    expect(detail.columns).toEqual(["vendor_name", "hq", "crm_id"]);
+    const table = buildDataTableModel({ rows: detail.rows, columns: detail.columns, showIndex: !detail.columns?.includes("rank") });
+    expect(table.headers.map((h) => h.label)).toEqual(["#", "Vendor name", "HQ", "CRM ID"]);
+  });
+
+  it("a paused hand-written run reports the checkpoint's active time so far; one that hasn't worked yet reports none", async () => {
+    const run = await db.run.create({
+      data: {
+        organizationId: t.organization.id,
+        jobId: hired.job.id,
+        workerId: hired.worker.id,
+        workerVersionId: hired.version.id,
+        status: "WAITING_FOR_APPROVAL",
+        trigger: "MANUAL",
+        simulated: true,
+        startedAt: new Date(Date.now() - 60_000),
+        checkpoint: toJson({ version: 1, componentIndex: 2, context: {}, nextStepIndex: 3, counters: { modelCalls: 2, toolCalls: 1, costUsd: 0.01, activeMs: 12_345 } }),
+      },
+    });
+    const live = await getRunLiveView(t.organization.id, run.id);
+    expect(live.run).toMatchObject({ status: "WAITING_FOR_APPROVAL", durationMs: 12_345, finishedAt: null });
+    expect((await getRunDetail(t.organization.id, run.id)).live.run.durationMs).toBe(12_345);
+    expect((await listRuns(t.organization.id, { status: "WAITING_FOR_APPROVAL" })).find((r) => r.id === run.id)?.durationMs).toBe(12_345);
+
+    const fresh = await db.run.create({
+      data: {
+        organizationId: t.organization.id,
+        jobId: hired.job.id,
+        workerId: hired.worker.id,
+        workerVersionId: hired.version.id,
+        status: "RUNNING",
+        trigger: "MANUAL",
+        simulated: true,
+        startedAt: new Date(),
+        checkpoint: toJson({ version: 1, counters: { modelCalls: 0, toolCalls: 0, costUsd: 0, activeMs: 0 } }),
+      },
+    });
+    expect((await getRunLiveView(t.organization.id, fresh.id)).run.durationMs).toBeNull();
+    // Terminal runs keep their final Run.durationMs, whatever the checkpoint says.
+    const done = await createRun(t, hired, { status: "SUCCEEDED" });
+    await db.run.update({ where: { id: done.id }, data: { checkpoint: toJson({ version: 1, counters: { modelCalls: 0, toolCalls: 0, costUsd: 0, activeMs: 99_999 } }) } });
+    expect((await getRunLiveView(t.organization.id, done.id)).run.durationMs).toBe(4_200);
   });
 
   it("a hand-written WAITING run whose APPROVAL step has no approvalId still pairs the step with its request", async () => {

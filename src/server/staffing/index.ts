@@ -7,7 +7,7 @@ export { updateJobSpec, approveJobSpec, reviseJobSpec, discardJob } from "./spec
 export { getHireFlowState } from "./flow-state";
 export { proposeWorker } from "./propose";
 export { hireWorker } from "./hire";
-export { designBlueprint } from "./design";
+export { designBlueprint, reportTableColumns } from "./design";
 export { estimateCost } from "./cost";
 export { deriveKpis, deriveEvaluationPlan } from "./kpis";
 export { draftFromTemplate } from "./templates";

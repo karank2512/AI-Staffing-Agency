@@ -34,6 +34,20 @@ const CONFIDENCE_BY_FAMILY: Record<JobFamily, CostEstimate["confidence"]> = {
   general: "low",
 };
 
+/**
+ * The quality review: after every successful run the reviewer (an LLM judge on the standard tier) reads the
+ * deliverable, and its spend lands on the run like any other model call. Its prompt is the brief and rubric plus
+ * the deliverable and a sample of up to 20 records, so it scales with the record count, not with the pipeline.
+ */
+export const QUALITY_REVIEW_ID = "quality_review";
+const REVIEW_BASE_INPUT_TOKENS = 900;
+const REVIEW_TOKENS_PER_RECORD = 70;
+const REVIEW_MAX_SAMPLE_RECORDS = 20;
+const REVIEW_DEFAULT_RECORDS = 12;
+const REVIEW_PROSE_TOKENS: Record<WorkerBlueprint["deliverable"]["format"], number> = { markdown: 600, csv: 200, json: 200 };
+const REVIEW_BASE_OUTPUT_TOKENS = 150;
+const REVIEW_OUTPUT_TOKENS_PER_CRITERION = 40;
+
 const round6 = (n: number) => Math.round(n * 1_000_000) / 1_000_000;
 
 /** Expected model turns: one to plan, one to answer, and about 1.5 per tool (call + read), capped by maxTurns. */
@@ -65,6 +79,23 @@ function agentItem(agent: AgentComponent): CostBreakdownItem {
   };
 }
 
+function qualityReviewItem(blueprint: Omit<WorkerBlueprint, "costEstimate">): CostBreakdownItem {
+  const records = blueprint.kpis.find((k) => k.metric === "records_per_run")?.target ?? REVIEW_DEFAULT_RECORDS;
+  const inputTokens =
+    REVIEW_BASE_INPUT_TOKENS + REVIEW_TOKENS_PER_RECORD * Math.min(REVIEW_MAX_SAMPLE_RECORDS, Math.max(0, records)) + REVIEW_PROSE_TOKENS[blueprint.deliverable.format];
+  const outputTokens = REVIEW_BASE_OUTPUT_TOKENS + REVIEW_OUTPUT_TOKENS_PER_CRITERION * blueprint.evaluation.rubric.length;
+  return {
+    componentId: QUALITY_REVIEW_ID,
+    label: "Quality review",
+    modelTier: "standard",
+    estModelCalls: 1,
+    estInputTokens: Math.round(inputTokens),
+    estOutputTokens: Math.round(outputTokens),
+    estToolCalls: 0,
+    costUsd: round6(llm.estimateCostUsd("standard", inputTokens, outputTokens)),
+  };
+}
+
 function deterministicItem(component: Extract<BlueprintComponent, { type: "deterministic" }>): CostBreakdownItem {
   return {
     componentId: component.id,
@@ -78,7 +109,7 @@ function deterministicItem(component: Extract<BlueprintComponent, { type: "deter
 }
 
 export function estimateCost(blueprint: Omit<WorkerBlueprint, "costEstimate">): CostEstimate {
-  const breakdown = blueprint.components.map((c) => (c.type === "agent" ? agentItem(c) : deterministicItem(c)));
+  const breakdown = [...blueprint.components.map((c) => (c.type === "agent" ? agentItem(c) : deterministicItem(c))), qualityReviewItem(blueprint)];
   const perRunUsd = round6(breakdown.reduce((sum, item) => sum + item.costUsd, 0));
   const perMonth = runsPerMonth(blueprint.schedule);
   const agents = blueprint.components.filter((c): c is AgentComponent => c.type === "agent");
@@ -95,6 +126,7 @@ export function estimateCost(blueprint: Omit<WorkerBlueprint, "costEstimate">): 
   );
   if (toolCalls > 0) assumptions.push(`About ${Math.round(toolCalls)} tool calls per run at the platform's per-call fees.`);
   if (deterministic > 0) assumptions.push(`${deterministic} deterministic step${deterministic === 1 ? "" : "s"} (validation, ranking, formatting) run for free.`);
+  assumptions.push("Includes the quality review of each deliverable: one standard-tier call that is billed to the run.");
   assumptions.push(`${describeCadence(blueprint.schedule)} → about ${perMonth} runs per month.`);
 
   return {

@@ -21,15 +21,23 @@ type Hired = Awaited<ReturnType<typeof createHiredWorker>>;
 async function createRun(
   t: TestOrg,
   hired: Hired,
-  data: { status: "QUEUED" | "RUNNING" | "WAITING_FOR_APPROVAL" | "SUCCEEDED" | "FAILED" | "CANCELLED"; finishedAt?: Date; createdAt?: Date; error?: string },
+  data: {
+    status: "QUEUED" | "RUNNING" | "WAITING_FOR_APPROVAL" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+    finishedAt?: Date;
+    createdAt?: Date;
+    error?: string;
+    trigger?: "MANUAL" | "SCHEDULED" | "RETRY";
+    workerVersionId?: string;
+  },
 ) {
   return db.run.create({
     data: {
       organizationId: t.organization.id,
       jobId: hired.job.id,
       workerId: hired.worker.id,
-      workerVersionId: hired.version.id,
+      workerVersionId: data.workerVersionId ?? hired.version.id,
       status: data.status,
+      trigger: data.trigger,
       simulated: true,
       error: data.error,
       finishedAt: data.finishedAt,
@@ -42,20 +50,28 @@ async function createDeliverable(
   t: TestOrg,
   hired: Hired,
   runId: string,
-  data: { status: "PENDING_REVIEW" | "ACCEPTED" | "REJECTED"; title?: string; feedback?: string; reviewedAt?: Date },
+  data: {
+    status: "PENDING_REVIEW" | "ACCEPTED" | "REJECTED";
+    title?: string;
+    feedback?: string;
+    reviewedAt?: Date;
+    createdAt?: Date;
+    workerVersionId?: string;
+  },
 ) {
   return db.deliverable.create({
     data: {
       organizationId: t.organization.id,
       jobId: hired.job.id,
       workerId: hired.worker.id,
-      workerVersionId: hired.version.id,
+      workerVersionId: data.workerVersionId ?? hired.version.id,
       runId,
       title: data.title ?? "Weekly report",
       content: "# Report",
       status: data.status,
       feedback: data.feedback,
       reviewedAt: data.reviewedAt,
+      ...(data.createdAt ? { createdAt: data.createdAt } : {}),
     },
   });
 }
@@ -159,6 +175,8 @@ describe("queries/workforce: getWorkforce", () => {
     const { attention } = await getWorkforce(t.organization.id);
     expect(attention.map((a) => a.kind)).toEqual(["approval", "health", "run_failed", "deliverable_rejected"]);
     expect(attention[0]).toMatchObject({ kind: "approval", workerName: "Sam", toolLabel: expect.any(String), title: "Sam wants to email the digest" });
+    // The strip's Approve confirmation shows exactly what will be sent, so the payload travels with the item.
+    expect(attention[0]).toMatchObject({ payload: { channel: "email", recipients: ["team@acme.example"], subject: "Weekly report" } });
     expect(attention[1]).toMatchObject({ kind: "health", workerName: "Sam", reason: "2 of the last 3 runs failed", score: 41 });
     expect(attention[2]).toMatchObject({ kind: "run_failed", workerName: "Sam", error: "Cost limit exceeded" });
     expect(attention[3]).toMatchObject({ kind: "deliverable_rejected", workerName: "Sam", title: "Market analysis", feedback: "Half the rows were duplicates" });
@@ -199,6 +217,74 @@ describe("queries/workforce: getWorkforce", () => {
     } finally {
       await db.job.delete({ where: { id: retired.job.id } });
     }
+  });
+});
+
+describe("queries/workforce: the attention strip drops what was already dealt with", () => {
+  let t: TestOrg;
+  const ids: { listedRuns: string[]; listedDeliverables: string[] } = { listedRuns: [], listedDeliverables: [] };
+
+  beforeAll(async () => {
+    t = await createTestOrg("pages-workforce-attention");
+    const now = new Date();
+    const at = (hoursAgo: number) => subHours(now, hoursAgo);
+    const failAt = (hired: Hired, hoursAgo: number, extra: { workerVersionId?: string } = {}) =>
+      createRun(t, hired, { status: "FAILED", createdAt: at(hoursAgo + 0.1), finishedAt: at(hoursAgo), error: "Boom", ...extra });
+
+    // Ben failed three times, then a run succeeded (resolved), then failed again (still open).
+    const ben = await createHiredWorker(t.organization.id, { name: "Ben" });
+    for (const h of [96, 84, 72]) await failAt(ben, h);
+    await createRun(t, ben, { status: "SUCCEEDED", createdAt: at(60), finishedAt: at(59.5) });
+    const benLate = await failAt(ben, 24);
+
+    // Eve failed once, long enough ago that the old "newest 3" cut would have hidden her behind resolved rows.
+    const eve = await createHiredWorker(t.organization.id, { name: "Eve" });
+    const eveFail = await failAt(eve, 120);
+
+    // Cora failed and the user asked her to try again (the retry is still queued).
+    const cora = await createHiredWorker(t.organization.id, { name: "Cora" });
+    await failAt(cora, 48);
+    await createRun(t, cora, { status: "QUEUED", trigger: "RETRY" });
+
+    // Rosa's v1 failed and had work sent back; the user replaced v1 with v2.
+    const rosa = await createHiredWorker(t.organization.id, { name: "Rosa" });
+    const rosaFail = await failAt(rosa, 12);
+    await createDeliverable(t, rosa, rosaFail.id, { status: "REJECTED", title: "Rosa v1 report", reviewedAt: at(11), createdAt: at(12) });
+    const rosaV2 = await db.workerVersion.create({
+      data: { workerId: rosa.worker.id, jobSpecId: rosa.jobSpec.id, version: 2, status: "ACTIVE", blueprint: toJson(rosa.blueprint), changeReason: "REPLACEMENT", parentVersionId: rosa.version.id, activatedAt: at(10) },
+    });
+    await db.workerVersion.update({ where: { id: rosa.version.id }, data: { status: "REPLACED", retiredAt: at(10) } });
+    await db.worker.update({ where: { id: rosa.worker.id }, data: { currentVersionId: rosaV2.id } });
+
+    // Riley was retired; nothing of theirs needs the user any more.
+    const riley = await createHiredWorker(t.organization.id, { name: "Riley" });
+    const rileyFail = await failAt(riley, 5);
+    await createDeliverable(t, riley, rileyFail.id, { status: "REJECTED", title: "Riley report", reviewedAt: at(4), createdAt: at(5) });
+    await db.worker.update({ where: { id: riley.worker.id }, data: { status: "RETIRED", retiredAt: at(3) } });
+
+    // Dex had a report sent back, then delivered one that was accepted (resolved), then another sent back (open).
+    const dex = await createHiredWorker(t.organization.id, { name: "Dex" });
+    const dexRun = await createRun(t, dex, { status: "SUCCEEDED", createdAt: at(80), finishedAt: at(79) });
+    await createDeliverable(t, dex, dexRun.id, { status: "REJECTED", title: "Dex first", reviewedAt: at(70), createdAt: at(72) });
+    await createDeliverable(t, dex, dexRun.id, { status: "ACCEPTED", title: "Dex second", reviewedAt: at(47), createdAt: at(48) });
+    const dexLate = await createDeliverable(t, dex, dexRun.id, { status: "REJECTED", title: "Dex third", reviewedAt: at(23), createdAt: at(24) });
+
+    ids.listedRuns = [benLate.id, eveFail.id];
+    ids.listedDeliverables = [dexLate.id];
+  });
+  afterAll(async () => {
+    await t.cleanup();
+  });
+
+  it("lists only open failures and rejections from current versions of seated workers", async () => {
+    const { attention } = await getWorkforce(t.organization.id);
+    const runs = attention.flatMap((a) => (a.kind === "run_failed" ? [a.runId] : []));
+    const deliverables = attention.flatMap((a) => (a.kind === "deliverable_rejected" ? [a.deliverableId] : []));
+    expect(runs).toEqual(ids.listedRuns);
+    expect(deliverables).toEqual(ids.listedDeliverables);
+    expect(attention.map((a) => a.workerName)).not.toContain("Riley");
+    expect(attention.map((a) => a.workerName)).not.toContain("Rosa");
+    expect(attention.map((a) => a.workerName)).not.toContain("Cora");
   });
 });
 

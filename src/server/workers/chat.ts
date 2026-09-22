@@ -176,7 +176,8 @@ export async function sendMessageToWorker(s: SessionContext, workerId: string, c
       s,
       worker,
       user: { content: message, classification, instructionActive: true, metadata: userMetadata },
-      reply: { content: temporaryInstructionReply(ctx, normalized), metadata: { simulated: true, normalizedInstruction: normalized } },
+      // The acknowledgement is a template; "Simulated" is true only when the classification ran on the mock provider.
+      reply: { content: temporaryInstructionReply(ctx, normalized), metadata: { simulated: classified.simulated, normalizedInstruction: normalized } },
     });
     await recordActivity({
       organizationId: s.organizationId,
@@ -218,7 +219,7 @@ export async function sendMessageToWorker(s: SessionContext, workerId: string, c
     user: { content: message, classification, instructionActive: false, proposedVersionId: proposed.versionId, metadata: userMetadata },
     reply: {
       content: reply,
-      metadata: { simulated: true, proposedVersionId: proposed.versionId, version: proposed.version, href, changes: derived.changes },
+      metadata: { simulated: classified.simulated, proposedVersionId: proposed.versionId, version: proposed.version, href, changes: derived.changes },
     },
   });
   return { ...ids, classification, proposedVersionId: proposed.versionId };

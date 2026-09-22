@@ -4,9 +4,11 @@ import type { SessionContext } from "@/server/auth/types";
 import { DEMO_USER } from "@/server/auth/types";
 import { verifyPassword } from "@/server/auth/password";
 import { db } from "@/server/db";
-import { parseBlueprint } from "@/server/domain";
-import { decideApproval, enqueueRun, executeRun } from "@/server/runtime";
+import { parseBlueprint, parseJobSpec } from "@/server/domain";
+import { decideApproval, deliverableSummary, enqueueRun, executeRun, runDeterministic } from "@/server/runtime";
+// Not on the runtime index; the test only reads the checkpoint the seed wrote.
 import { parseCheckpoint } from "@/server/runtime/checkpoint";
+import { tools } from "@/server/tools";
 import { proposeReplacement } from "@/server/workers";
 import { DEMO_IDS, seedDemo, type SeedSummary } from "../../prisma/seed/demo";
 
@@ -120,7 +122,10 @@ describe("demo seed", () => {
     expect(checkpoint!.agent?.pendingToolCalls[0]).toMatchObject({ toolCallId: approval.toolCallId, callId: "mock_0_0", toolName: "send_notification" });
     expect(checkpoint!.agent?.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(checkpoint!.counters.activeMs).toBeGreaterThan(0);
-    expect(Object.keys(checkpoint!.context)).toEqual(expect.arrayContaining(["job_brief", "instructions", "records", "stats", "insights", "report"]));
+    // Everything upstream of the notifier ran — including the feedback shortlist steps the staffing engine designs.
+    const upstream = blueprint.components.slice(0, checkpoint!.componentIndex).map((c) => c.outputKey);
+    expect(upstream).toEqual(expect.arrayContaining(["records", "notable_feedback", "report"]));
+    expect(Object.keys(checkpoint!.context)).toEqual(expect.arrayContaining(["job_brief", "instructions", ...upstream]));
 
     const deliverable = await db.deliverable.findUniqueOrThrow({ where: { id: checkpoint!.deliverableId! } });
     expect(deliverable).toMatchObject({ runId: run.id, status: "PENDING_REVIEW", format: "MARKDOWN" });
@@ -130,6 +135,56 @@ describe("demo seed", () => {
     const approvalStep = await db.runStep.findFirstOrThrow({ where: { runId: run.id, kind: "APPROVAL" } });
     expect(approvalStep).toMatchObject({ status: "WAITING", componentId: "notifier", title: approval.title, input: { approvalId: approval.id, toolCallId: approval.toolCallId } });
     expect(checkpoint!.nextStepIndex).toBe(approvalStep.index + 1);
+  });
+
+  it("describes every approval the way tools.describe does today: a plain-text preview, never raw markdown", async () => {
+    const approvals = await db.approval.findMany({ where: { organizationId: summary.organizationId } });
+    expect(approvals.length).toBeGreaterThan(1);
+    for (const approval of approvals) {
+      const described = tools.describe(approval.toolName, approval.payload).approval;
+      expect(approval.title).toBe(described.title);
+      expect(approval.description).toBe(described.description ?? null);
+      expect(approval.description).toBeTruthy();
+      expect(approval.description).not.toMatch(/^#|\n|\*\*|\| ---/);
+    }
+  });
+
+  it("renders every seeded deliverable with today's engine: the report builder and the runtime's summary", async () => {
+    const deliverables = await db.deliverable.findMany({
+      where: { organizationId: summary.organizationId },
+      include: { run: true, workerVersion: { include: { jobSpec: true } } },
+    });
+    expect(deliverables.length).toBeGreaterThan(10);
+    for (const d of deliverables) {
+      const blueprint = parseBlueprint(d.workerVersion.blueprint);
+      const spec = parseJobSpec(d.workerVersion.jobSpec.spec);
+      const records = Array.isArray(d.data) ? (d.data as Array<Record<string, unknown>>) : null;
+      expect(d.summary, d.title).toBe(deliverableSummary({ blueprint, spec, contentValue: d.content, content: d.content, records }));
+
+      // Re-compile the report from the run's own context (footer aside: it cites the run's trace and clock).
+      const checkpoint = parseCheckpoint(d.run.checkpoint);
+      const report = blueprint.components.find((c) => c.type === "deterministic" && c.operation === "compile_report");
+      if (!checkpoint || report?.type !== "deterministic" || report.operation !== "compile_report") throw new Error(`${d.title}: no report to re-derive`);
+      const body = runDeterministic({ ...report, config: { ...report.config, includeMethodology: false } }, checkpoint.context, { personaName: "", now: new Date(), pipeline: [], toolUsage: [], recordTrail: [] });
+      expect(d.content.startsWith(String(body.value).trimEnd()), d.title).toBe(true);
+    }
+  });
+
+  it("reviews performance only for workers with evaluated runs, citing the score's run window", async () => {
+    const reviews = await db.workerReview.findMany({ where: { organizationId: summary.organizationId } });
+    expect(reviews.map((r) => r.workerId).sort()).toEqual([summary.workers.alex, summary.workers.sam].sort());
+    for (const review of reviews) {
+      const firstEvaluated = await db.evaluation.findFirst({
+        where: { organizationId: summary.organizationId, workerId: review.workerId, workerVersionId: review.workerVersionId, runId: { not: null } },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(firstEvaluated).not.toBeNull();
+      expect(firstEvaluated!.createdAt.getTime()).toBeLessThan(review.createdAt.getTime());
+      expect(review.overallScore).toBeGreaterThan(0);
+    }
+    const generated = await db.activityEvent.findMany({ where: { organizationId: summary.organizationId, type: "REVIEW_GENERATED" } });
+    expect(generated).toHaveLength(reviews.length);
+    for (const event of generated) expect(event.detail).toMatch(/^Score \d+\/100 over the last \d+ finished runs?$/);
   });
 
   it("gives Sam the record that justifies a replacement and nothing in flight", async () => {
@@ -181,6 +236,11 @@ describe("demo seed", () => {
       expect(indexes).toEqual(indexes.map((_, i) => i));
       for (const call of run.modelCalls.filter((m) => m.purpose === "agent.turn")) expect(call.runStepId).not.toBeNull();
       for (const call of run.toolCalls) expect(call.runStepId).not.toBeNull();
+      // A gated call's step times the call itself (never the approval wait); a declined or pending one has none.
+      for (const call of run.toolCalls.filter((c) => c.toolName === "send_notification")) {
+        const step = run.steps.find((s) => s.id === call.runStepId);
+        expect(step?.durationMs, call.status).toBe(call.status === "SUCCEEDED" ? call.latencyMs : null);
+      }
       if (run.status === "SUCCEEDED") {
         expect(run.durationMs).toBeGreaterThanOrEqual(30_000);
         expect(run.durationMs).toBeLessThanOrEqual(180_000);

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_EVALUATION_WEIGHTS, DEFAULT_PASS_THRESHOLD, DETERMINISTIC_CHECK_CONFIG_SCHEMAS, EvaluationPlanSchema, KpiSchema } from "@/server/domain";
-import { deriveEvaluationPlan, deriveKpis } from "@/server/staffing";
+import { DEFAULT_EVALUATION_WEIGHTS, DEFAULT_PASS_THRESHOLD, DEFAULT_RUN_LIMITS, DETERMINISTIC_CHECK_CONFIG_SCHEMAS, EvaluationPlanSchema, KpiSchema } from "@/server/domain";
+import { deriveEvaluationPlan, deriveKpis, designBlueprint, draftFromTemplate } from "@/server/staffing";
 import { avatarColorFor, PERSONA_NAMES, pickPersonaName, resolvePersonaName } from "@/server/staffing/persona";
 import { makeJobSpec } from "../helpers/fixtures";
-import { specFor } from "./helpers";
+import { FAMILIES, specFor } from "./helpers";
 
 describe("staffing: deriveKpis", () => {
   it("produces the contracted KPI set with targets from the spec", () => {
@@ -22,12 +22,23 @@ describe("staffing: deriveKpis", () => {
     expect(kpis.find((k) => k.metric === "acceptance_rate")?.unit).toBe("%");
   });
 
-  it("omits records_per_run without a target and defaults the cost target to $1", () => {
+  it("omits records_per_run without a target, and uses ONE cost ceiling for the KPI, the check and the hard limit", () => {
     const base = makeJobSpec();
     const spec = { ...base, deliverable: { ...base.deliverable, targetCount: undefined }, budget: {} };
     const kpis = deriveKpis(spec);
     expect(kpis.map((k) => k.metric)).not.toContain("records_per_run");
-    expect(kpis.find((k) => k.metric === "cost_per_run_usd")?.target).toBe(1);
+    expect(kpis.find((k) => k.metric === "cost_per_run_usd")?.target).toBe(DEFAULT_RUN_LIMITS.maxCostPerRunUsd);
+    expect(deriveEvaluationPlan(spec, { keyFields: [] }).deterministicChecks.find((c) => c.type === "max_cost_usd")?.config).toEqual({ max: DEFAULT_RUN_LIMITS.maxCostPerRunUsd });
+
+    // Same for a designed worker: KPI target === check === blueprint limit, with or without a budget.
+    for (const budget of [{}, { maxCostPerRunUsd: 0.4 }]) {
+      const research = specFor("market_research", { budget });
+      const bp = designBlueprint(research, draftFromTemplate(research));
+      const kpi = bp.kpis.find((k) => k.metric === "cost_per_run_usd")?.target;
+      const check = bp.evaluation.deterministicChecks.find((c) => c.type === "max_cost_usd")?.config;
+      expect(check).toEqual({ max: kpi });
+      expect(bp.limits.maxCostPerRunUsd).toBe(kpi);
+    }
   });
 });
 
@@ -46,9 +57,12 @@ describe("staffing: deriveEvaluationPlan", () => {
     expect(byType.contains_sections).toEqual({ sections: ["Summary", "Top rounds", "Trends"] });
     expect(byType.max_cost_usd).toEqual({ max: 1 });
 
-    expect(plan.rubric.map((r) => r.criterion)).toEqual(["Records per run", "Field completeness", "Accuracy & sourcing", "Usefulness"]);
-    expect(plan.rubric.map((r) => r.id)).toEqual(["coverage", "accuracy", "accuracy_sourcing", "usefulness"]);
-    expect(plan.rubric[0].description).toContain(">= 10");
+    // Criteria are qualities a reviewer can judge from the deliverable, never KPI names.
+    expect(plan.rubric.map((r) => r.criterion)).toEqual(["Coverage of the brief", "Every round cites a source", "Accuracy & sourcing", "Specificity of insights", "Usefulness for the people deciding on it"]);
+    expect(plan.rubric.map((r) => r.id)).toEqual(["coverage", "accuracy", "accuracy_sourcing", "specificity", "usefulness"]);
+    expect(plan.rubric[0].description).toContain("about 10 records per run");
+    expect(plan.rubric[0].description).toContain("At least 10 relevant funded startups per report.");
+    expect(plan.rubric[1].description).toBe("Every round cites a source. Target: 100%.");
     expect(plan.weights).toEqual(DEFAULT_EVALUATION_WEIGHTS);
     expect(plan.passThreshold).toBe(DEFAULT_PASS_THRESHOLD);
   });
@@ -75,8 +89,33 @@ describe("staffing: deriveEvaluationPlan", () => {
     const plan = deriveEvaluationPlan(base, { keyFields: ["nope"] });
     expect(plan.deterministicChecks.find((c) => c.type === "no_duplicates")?.config).toEqual({ keyFields: ["company"] });
     expect(new Set(plan.rubric.map((r) => r.id)).size).toBe(plan.rubric.length);
-    expect(plan.rubric[0]).toMatchObject({ id: "accuracy", criterion: "Sourced", description: "Sourced.", weight: 1 });
-    expect(plan.rubric[1].id).toBe("accuracy_2");
+    expect(plan.rubric[1]).toMatchObject({ id: "accuracy", criterion: "Sourced", description: "Sourced.", weight: 1 });
+    expect(plan.rubric[2].id).toBe("accuracy_2");
+  });
+
+  it("never turns a KPI or a measured metric into a judged criterion, for any family or format", () => {
+    const kpiNames = new Set(deriveKpis(makeJobSpec()).map((k) => k.name.toLowerCase()));
+    const metricish = /acceptance rate|quality score|records per run|field completeness|success rate|cost per run|duplicates$/i;
+    for (const family of FAMILIES) {
+      for (const format of ["markdown", "csv"] as const) {
+        const base = specFor(family);
+        const spec = { ...base, deliverable: { ...base.deliverable, format, sections: format === "markdown" ? base.deliverable.sections : [] } };
+        const rubric = deriveEvaluationPlan(spec, { keyFields: [] }).rubric;
+        for (const r of rubric) {
+          expect(kpiNames.has(r.criterion.toLowerCase()), r.criterion).toBe(false);
+          expect(r.criterion, r.criterion).not.toMatch(metricish);
+          expect(r.criterion.length).toBeLessThanOrEqual(60);
+          expect(r.criterion).not.toContain("…");
+          // A KPI threshold is not something a reader can check on the page.
+          expect(r.description).not.toMatch(/Target: >= \d+%/);
+        }
+        expect(rubric.map((r) => r.criterion)).toEqual(expect.arrayContaining(["Coverage of the brief", "Accuracy & sourcing", format === "markdown" ? "Specificity of insights" : "Specificity of each record"]));
+        expect(rubric.some((r) => r.criterion.startsWith("Usefulness for "))).toBe(true);
+      }
+    }
+    // A stated audience is the one the usefulness criterion names.
+    const content = specFor("content", {}, { audience: "Developers, friendly and specific" });
+    expect(deriveEvaluationPlan(content, { keyFields: [] }).rubric.at(-1)?.criterion).toBe("Usefulness for developers");
   });
 });
 

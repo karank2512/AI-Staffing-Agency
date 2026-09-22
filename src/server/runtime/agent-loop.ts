@@ -1,7 +1,7 @@
 import type { AgentComponent } from "@/server/domain/blueprint";
 import { llm } from "@/server/models";
 import type { ChatMessage } from "@/server/models/types";
-import { simulation } from "@/server/simulation";
+import { agentTurnHints, simulation } from "@/server/simulation";
 import { tools } from "@/server/tools";
 import { RunFailure, toRunFailure } from "./failure";
 import { parseJsonAnswer } from "./json";
@@ -38,6 +38,8 @@ export async function runAgentComponent(slice: RunSlice, component: AgentCompone
   const toolSpecs = tools.specsFor(component.tools);
   const instructions = slice.run.input.instructions;
   const jobBrief = typeof cp.context.job_brief === "string" ? cp.context.job_brief : "";
+  // The mock brain counts duplicates the way this blueprint's dedupe step defines them.
+  const hints = agentTurnHints(blueprint);
   let repairPending = false;
 
   for (;;) {
@@ -61,7 +63,7 @@ export async function runAgentComponent(slice: RunSlice, component: AgentCompone
           system,
           messages: agent.messages,
           tools: toolSpecs,
-          mock: (input) => simulation.agentTurn({ component, jobFamily: blueprint.jobFamily, spec, jobBrief, instructions, ...input }),
+          mock: (input) => simulation.agentTurn({ component, jobFamily: blueprint.jobFamily, spec, jobBrief, instructions, ...hints, ...input }),
         },
         {
           organizationId: slice.run.organizationId,

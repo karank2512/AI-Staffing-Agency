@@ -24,7 +24,7 @@ Sign in with the pre-filled demo account (`demo@aistaffing.dev` / `demo1234`). T
 
 ### Going live (optional)
 
-Add any of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` to `.env` and restart. Tiers route to the first available provider (Anthropic → OpenAI → Google); override per tier with `MODEL_TIER_FAST|STANDARD|REASONING="<provider>:<model>"`. Add `TAVILY_API_KEY` (env or the Settings → Tool credentials vault) for real web search. Without keys the app runs in **Simulated mode** — clearly badged in the UI — on a deterministic mock provider and simulated tools.
+Add any of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` to `.env` and restart. Tiers route to the first available provider (Anthropic → OpenAI → Google); override per tier with `MODEL_TIER_FAST|STANDARD|REASONING="<provider>:<model>"`. Add `TAVILY_API_KEY` (env or the Settings → Tool credentials vault) for real web search — it only takes effect once a model provider key is set too, because a run started in Simulated mode keeps every tool simulated. Without model keys the app runs in **Simulated mode** — clearly badged in the UI — on a deterministic mock provider and simulated tools.
 
 ### Commands
 
@@ -32,7 +32,7 @@ Add any of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`
 |---|---|
 | `npm run dev` | Next.js dev server + in-process executor/scheduler |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm test` | Vitest suite (needs `ai_staffing_agency_test` DB — `createdb ai_staffing_agency_test`) |
+| `npm test` | Vitest suite (needs the `ai_staffing_agency_test` DB and a `.env.test` — see [Tests](#tests)) |
 | `npm run db:seed` | Re-seed the demo workspace (idempotent) |
 | `npm run db:deploy` | Apply migrations |
 
@@ -110,7 +110,22 @@ tests/                Vitest suites per module + tests/e2e/full-loop.test.ts
 
 ## Tests
 
-`npm test` runs the Vitest suite against `ai_staffing_agency_test` in Simulated mode: schema validation, versioning immutability, run state transitions, atomic claiming and stale-lock recovery, server-side permission enforcement, approval pause/resume idempotency, evaluators and scoring, cost math, replacement workflow, and a full mock-mode end-to-end engine test (job → spec → blueprint → hire → run → deliverable → evaluation → feedback → review → chat → replace).
+One-time setup — a separate database plus a `.env.test` next to `.env` (it is gitignored like every `.env*` file, and Vitest reads its settings from it and nowhere else):
+
+```bash
+createdb ai_staffing_agency_test
+cat > .env.test <<EOF
+DATABASE_URL="postgresql://$(whoami)@localhost:5432/ai_staffing_agency_test?schema=public&options=-c%20TimeZone%3DUTC"
+AUTH_SECRET="$(openssl rand -base64 32)"
+AUTH_TRUST_HOST=true
+CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+EXECUTOR_DISABLED=true
+EOF
+```
+
+Adjust the `DATABASE_URL` user/password if your Postgres is not a default Homebrew install. The database name must end in `_test` (the suite refuses to run otherwise), and the URL keeps the `TimeZone=UTC` option like `.env`. Migrations are applied automatically at the start of each run, and provider keys are cleared, so tests always run in Simulated mode.
+
+`npm test` then runs the Vitest suite against `ai_staffing_agency_test` in Simulated mode: schema validation, versioning immutability, run state transitions, atomic claiming and stale-lock recovery, server-side permission enforcement, approval pause/resume idempotency, evaluators and scoring, cost math, replacement workflow, and a full mock-mode end-to-end engine test (job → spec → blueprint → hire → run → deliverable → evaluation → feedback → review → chat → replace).
 
 ---
 

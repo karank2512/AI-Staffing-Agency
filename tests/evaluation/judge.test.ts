@@ -86,6 +86,50 @@ describe("evaluation: judge (pure)", () => {
     expect(again.criteria).toEqual(good.criteria);
   });
 
+  it("marks down well-formed records that break the brief's stage / region / sector constraints", () => {
+    const brief = makeJobSpec({
+      title: "Series A fintech companies in Europe",
+      objective: "Every weekday morning, research 15 Series A fintech companies in Europe that are hiring engineers.",
+      constraints: [],
+    });
+    const offBrief = [
+      { company: "Ridgeline GPU", stage: "Series C", amount_usd: 210_000_000, category: "GPU Cloud", hq: "Denver, CO", source_url: "https://news.example/a" },
+      { company: "Halcyon Compute", stage: "Series B", amount_usd: 85_000_000, category: "GPU Cloud", hq: "Austin, TX", source_url: "https://news.example/b" },
+      { company: "Kestrelflow", stage: "Series A", amount_usd: 34_000_000, category: "Inference Platform", hq: "London, UK", source_url: "https://news.example/c" },
+    ];
+    const onBrief = [
+      { company: "Ledgerlight", stage: "Series A", amount_usd: 24_000_000, category: "Payments Infrastructure", hq: "London, UK", source_url: "https://news.example/d" },
+      { company: "Paywick", stage: "Series A", amount_usd: 19_000_000, category: "Embedded Finance", hq: "Berlin, Germany", source_url: "https://news.example/e" },
+      { company: "Fernbank", stage: "Series A", amount_usd: 31_000_000, category: "Banking-as-a-Service", hq: "Dublin, Ireland", source_url: "https://news.example/f" },
+    ];
+    const csv = (records: typeof offBrief) => subject({ format: "csv", content: "company,stage\n", records });
+    const judged = (records: typeof offBrief) => {
+      const signals = measureDeliverable(brief, plan, csv(records));
+      const out = mockJudgeOutput(plan.rubric, signals, "seed");
+      const total = plan.rubric.reduce((sum, c) => sum + c.weight, 0);
+      return { signals, out, score: out.criteria.reduce((sum, c, i) => sum + c.score * plan.rubric[i].weight, 0) / total };
+    };
+
+    const bad = judged(offBrief);
+    expect(bad.signals.constraintFit).toEqual({
+      checked: 3,
+      fitting: 0,
+      labels: ["Series A", "Europe", "fintech"],
+      examples: ["Ridgeline GPU (Series C · Denver, CO · GPU Cloud)", "Halcyon Compute (Series B · Austin, TX · GPU Cloud)"],
+    });
+    const good = judged(onBrief);
+    expect(good.signals.constraintFit).toMatchObject({ checked: 3, fitting: 3 });
+    expect(bad.score).toBeLessThan(0.45);
+    expect(good.score - bad.score).toBeGreaterThan(0.35);
+    expect(bad.out.overallReasoning).toContain("Main issue: None of the 3 records match the brief (Series A, Europe, fintech)");
+    expect(bad.out.criteria.every((c) => c.reasoning.startsWith("None of the 3 records match the brief"))).toBe(true);
+
+    // The default AI-infrastructure tracker's records all fit its own brief, so nothing is marked down.
+    const plain = measureDeliverable(spec, plan, subject());
+    expect(plain.constraintFit?.fitting).toBe(plain.constraintFit?.checked);
+    expect(measureDeliverable(makeJobSpec({ title: "Weekly digest", objective: "Summarize what happened.", constraints: [] }), plan, subject()).constraintFit).toBeNull();
+  });
+
   it("signals: a CSV deliverable without records scores every criterion neutrally", () => {
     const s = subject({ format: "csv", content: "company,stage\nA,Seed\n", records: null });
     const signals = measureDeliverable(spec, plan, s);

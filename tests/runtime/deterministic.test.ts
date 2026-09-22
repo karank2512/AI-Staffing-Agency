@@ -5,7 +5,11 @@ import {
   computeStats,
   dedupe,
   filter,
+  formatColumnCell,
+  formatUsdCompact,
   humanizeHeader,
+  isMoneyColumn,
+  isUrlColumn,
   isMissing,
   matches,
   rank,
@@ -234,16 +238,17 @@ describe("deterministic: compile_report", () => {
     for (const heading of ["## Summary", "## Top rounds", "## By category", "## Themes", "## Methodology"]) expect(lines).toContain(heading);
     // Markdown sections are inserted as-is.
     expect(md).toContain("Serious money went to **vector databases** this week.");
-    // Table: header + separator + 10 rows, then the "showing" note.
+    // Table: header + separator + 10 rows (money as compact dollars), then the "showing" note.
     expect(lines).toContain("| Rank | Company | Amount USD |");
-    const tableRows = lines.filter((l) => /^\| \d+ \| Company \d+ \| [\d,]+ \|$/.test(l));
+    const tableRows = lines.filter((l) => /^\| \d+ \| Company \d+ \| \$\d+M \|$/.test(l));
     expect(tableRows).toHaveLength(10);
-    expect(tableRows[0]).toBe("| 1 | Company 1 | 30,000,000 |");
+    expect(tableRows[0]).toBe("| 1 | Company 1 | $30M |");
     expect(md).toContain("_Showing 10 of 30 records._");
     // Stats: counts by group with shares + numeric summary.
     expect(md).toContain("**6 records** in total.");
     expect(md).toContain("| vector db | 2 | 33% |");
-    expect(md).toContain("| Amount USD | 5 | 69,200,000 | 13,840,000 | 1,200,000 | 40,000,000 |");
+    // Money summaries are dollars too; the count is not.
+    expect(md).toContain("| Amount USD | 5 | $69.2M | $13.8M | $1.2M | $40M |");
     // Bullets.
     expect(md).toContain("- Category A\n- Category B");
     // Methodology.
@@ -269,6 +274,51 @@ describe("deterministic: compile_report", () => {
   it("escapes pipes and newlines inside cells so the table stays intact", () => {
     const [, , row] = renderTable([{ name: "A | B", note: "line one\nline two" }]);
     expect(row).toBe("| A \\| B | line one line two |");
+  });
+
+  it("formats money columns as compact dollars and URL columns as host-labelled links, leaving the records untouched", () => {
+    const rows = [
+      {
+        vendor: "Vectorloom",
+        amount_usd: 85_000_000,
+        price: "1,240",
+        cost_per_seat: 94,
+        monthly_price_usd: 19.5,
+        source_url: "https://www.news.example/funding/vectorloom?utm=x",
+        website: "vectorloom.example",
+      },
+    ];
+    const before = structuredClone(rows);
+    const [header, , row] = renderTable(rows);
+    expect(header).toBe("| Vendor | Amount USD | Price | Cost per seat | Monthly price USD | Source URL | Website |");
+    expect(row).toBe(
+      "| Vectorloom | $85M | $1.2K | $94 | $19.50 | [news.example](https://www.news.example/funding/vectorloom?utm=x) | [vectorloom.example](https://vectorloom.example/) |",
+    );
+    // Only the rendering changes: Deliverable.data and the CSV keep the raw values.
+    const report = compileReport({ records: rows }, { title: "T", sections: [{ heading: "Rows", sourceKey: "records", as: "table" }], includeMethodology: false }, meta);
+    expect(report.value).toContain("$85M");
+    expect(rows).toEqual(before);
+    expect(toCsv(rows, {}).value.split("\n")[1]).toContain("85000000");
+  });
+
+  it("formats compact dollars at every scale and leaves values it cannot read as dollars alone", () => {
+    expect([0, 0.0042, 0.42, 7, 94, 999, 1_000, 1_240, 999_949, 999_999, 7_500_000, 1_200_000_000, -1_500].map(formatUsdCompact)).toEqual([
+      "$0", "$0.0042", "$0.42", "$7", "$94", "$999", "$1K", "$1.2K", "$999.9K", "$1M", "$7.5M", "$1.2B", "-$1.5K",
+    ]);
+    expect(formatColumnCell("$12.5M", "amount_usd")).toBe("$12.5M");
+    expect(formatColumnCell("Contact sales", "monthly_price_usd")).toBe("Contact sales");
+    expect(formatColumnCell("18%", "price")).toBe("18%");
+    expect(formatColumnCell("€40", "price")).toBe("€40");
+    expect(formatColumnCell(null, "price")).toBe("");
+    expect(formatColumnCell("javascript:alert(1)", "source_url")).toBe("javascript:alert(1)");
+    expect(formatColumnCell("n/a", "website")).toBe("n/a");
+    expect(formatColumnCell("https://a.example/x (1)|y", "url")).toBe("[a.example](https://a.example/x%20%281%29%7Cy)");
+    // Column vocabulary: shares, changes and other currencies are not dollars; plain counts are not money at all.
+    expect(["amount_usd", "amount", "price", "unit_price", "cost", "monthlyPriceUsd", "arr_usd"].every(isMoneyColumn)).toBe(true);
+    expect(["price_change_pct", "amount_eur", "seat_count", "employees", "rank", "change_since_last"].some(isMoneyColumn)).toBe(false);
+    expect(["source_url", "url", "website", "pricing_url", "homepage", "linkedin_url"].every(isUrlColumn)).toBe(true);
+    expect(isUrlColumn("company")).toBe(false);
+    expect(formatColumnCell(12, "employees")).toBe("12");
   });
 });
 

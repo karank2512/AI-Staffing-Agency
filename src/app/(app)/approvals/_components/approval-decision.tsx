@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Check, X } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { JsonView } from "@/components/json-view";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,6 +20,12 @@ export interface ApprovalDecisionProps {
   toolLabel: string;
   /** Compact = the inline pair on the Workforce attention strip. */
   size?: "default" | "sm";
+  /**
+   * The exact tool input awaiting approval. Pass it from surfaces that do NOT already render the payload next to
+   * the buttons (the Workforce attention strip): the Approve confirmation then shows it, so nobody approves an
+   * external send without seeing its recipients and full body.
+   */
+  payload?: unknown;
 }
 
 const COPY: Record<Decision, { title: (name: string) => string; body: (name: string, tool: string) => string; confirm: string; success: (name: string) => string }> = {
@@ -37,7 +44,7 @@ const COPY: Record<Decision, { title: (name: string) => string; body: (name: str
 };
 
 /** Approve / Reject pair. Each opens a confirmation with an optional note that lands on the approval record. */
-export function ApprovalDecision({ approvalId, workerName, toolLabel, size = "default" }: ApprovalDecisionProps) {
+export function ApprovalDecision({ approvalId, workerName, toolLabel, size = "default", payload }: ApprovalDecisionProps) {
   const router = useRouter();
   const [note, setNote] = useState("");
 
@@ -55,6 +62,15 @@ export function ApprovalDecision({ approvalId, workerName, toolLabel, size = "de
     return (
       <div className="space-y-3">
         <p>{COPY[decision].body(workerName, toolLabel)}</p>
+        {decision === "approve" && payload !== undefined ? (
+          // The dialog is narrow: wrap long strings (a message body) and scroll inside the view instead of stretching it.
+          <JsonView
+            label={`What ${workerName} will send`}
+            value={payload}
+            defaultOpen
+            className="text-left [&_pre]:max-h-64 [&_pre]:break-words [&_pre]:whitespace-pre-wrap"
+          />
+        ) : null}
         <div className="space-y-1.5">
           <Label htmlFor={noteId} className="text-xs">
             Note <span className="font-normal text-muted-foreground">(optional)</span>

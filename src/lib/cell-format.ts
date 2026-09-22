@@ -1,4 +1,4 @@
-import { formatDate, formatDateTime, formatNumber } from "@/lib/format";
+import { formatDate, formatDateTime, formatNumber, sentenceCase } from "@/lib/format";
 import { sanitizeHref } from "@/lib/markdown";
 
 /**
@@ -98,4 +98,51 @@ export function isNumericColumn(rows: ReadonlyArray<Record<string, unknown>>, co
     sawNumber = true;
   }
   return sawNumber;
+}
+
+/** Header text for a record key: `source_url` → "Source URL", `hq` → "HQ", `icp_score` → "ICP score". */
+export function columnLabel(key: string): string {
+  return sentenceCase(key);
+}
+
+/**
+ * One header cell of a `DataTable`, in display order. The row-number column is a header like any other so the
+ * header row and every body row are built from the same list — dropping it can never leave the two misaligned.
+ */
+export type DataTableHeader =
+  | { kind: "index"; label: "#" }
+  | { kind: "field"; key: string; label: string; numeric: boolean };
+
+export interface DataTableModel {
+  headers: DataTableHeader[];
+  /** The rows to render (already truncated to `maxRows`). */
+  visibleRows: Array<Record<string, unknown>>;
+  /** Every usable row, including the ones cut by `maxRows` — the footer reports this. */
+  totalRows: number;
+  /** Data fields only (the row-number column is not a field). */
+  fieldCount: number;
+}
+
+export interface DataTableModelInput {
+  rows: unknown;
+  columns?: readonly string[] | null;
+  maxRows?: number;
+  /** Prepend a "#" row-number column. Turn off when the records carry their own ordering (a `rank` field). */
+  showIndex?: boolean;
+}
+
+/** Everything `DataTable` renders except the cells themselves. Pure, so the table's shape is unit-testable. */
+export function buildDataTableModel({ rows, columns, maxRows = 50, showIndex = true }: DataTableModelInput): DataTableModel {
+  const safeRows = Array.isArray(rows)
+    ? rows.filter((r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r))
+    : [];
+  const keys = columns && columns.length > 0 ? [...columns] : inferColumns(safeRows);
+  const limit = Math.max(1, Math.floor(Number.isFinite(maxRows) ? maxRows : 50));
+  const fields: DataTableHeader[] = keys.map((key) => ({ kind: "field", key, label: columnLabel(key), numeric: isNumericColumn(safeRows, key) }));
+  return {
+    headers: showIndex && fields.length > 0 ? [{ kind: "index", label: "#" }, ...fields] : fields,
+    visibleRows: safeRows.slice(0, limit),
+    totalRows: safeRows.length,
+    fieldCount: keys.length,
+  };
 }

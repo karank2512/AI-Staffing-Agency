@@ -4,7 +4,7 @@ import { db } from "@/server/db";
 import { describeCadence, renderJobBrief, workerFieldsToCadence, type Cadence, type JobSpec, type ReviewMetrics, type WorkerBlueprint, type WorkerScore } from "@/server/domain";
 import { computeWorkerScore, getWorkerMetrics, runScore } from "@/server/evaluation";
 import { conflict } from "@/server/errors";
-import { clip, parseStoredBlueprint, parseStoredSpec, type WorkerRecord } from "./shared";
+import { clip, formatKpiValue, lowerFirst, parseStoredBlueprint, parseStoredSpec, type WorkerRecord } from "./shared";
 
 /**
  * Everything a worker knows about itself when it answers a message: the job, its design, its last few runs,
@@ -26,6 +26,25 @@ export interface RecentRun {
   deliverable: { id: string; title: string; status: DeliverableStatus } | null;
   /** 0..100, null while unevaluated or not finished. */
   score: number | null;
+}
+
+/** What the most recent successful run actually did — the evidence behind "why these sources?". */
+export interface RunMethod {
+  runId: string;
+  at: Date;
+  /** web_search queries, in call order. */
+  searches: string[];
+  pagesRead: number;
+  /** Distinct hosts of the pages read, in order of first read. */
+  hosts: string[];
+  datasets: string[];
+  extractions: number;
+  /** Records in / out of the cleaning steps (validate_records → dedupe), when the design has them. */
+  collected: number | null;
+  kept: number | null;
+  /** Cleaning steps that ran ("validate_records", "dedupe"). */
+  checks: string[];
+  delivered: number | null;
 }
 
 export interface WorkerChatContext {
@@ -51,6 +70,7 @@ export interface WorkerChatContext {
   /** One-off instructions still waiting for the next run. */
   activeInstructions: string[];
   pendingProposal: { id: string; version: number } | null;
+  lastRunMethod: RunMethod | null;
   /** Chronological, for conversational continuity in the live prompt. */
   recentMessages: Array<{ role: MessageRole; content: string }>;
 }
@@ -94,6 +114,9 @@ export async function buildChatContext(organizationId: string, worker: WorkerRec
     }),
   ]);
 
+  const lastSucceeded = runs.find((r) => r.status === "SUCCEEDED");
+  const lastRunMethod = lastSucceeded ? await loadRunMethod(lastSucceeded.id, lastSucceeded.finishedAt ?? lastSucceeded.createdAt) : null;
+
   return {
     worker: {
       id: worker.id,
@@ -128,7 +151,65 @@ export async function buildChatContext(organizationId: string, worker: WorkerRec
       return typeof normalized === "string" && normalized.trim().length > 0 ? normalized : m.content;
     }),
     pendingProposal: proposal,
+    lastRunMethod,
     recentMessages: messages.reverse(),
+  };
+}
+
+const record = (v: unknown): Record<string, unknown> | null => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+const numberOf = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+function hostOf(url: unknown): string | null {
+  if (typeof url !== "string") return null;
+  try {
+    return new URL(url).host.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+/** The run id comes from an org-scoped run query above, so its steps and tool calls are the caller's. */
+async function loadRunMethod(runId: string, at: Date): Promise<RunMethod> {
+  const [calls, steps] = await Promise.all([
+    db.toolCall.findMany({ where: { runId, status: "SUCCEEDED" }, orderBy: { createdAt: "asc" }, select: { toolName: true, input: true } }),
+    db.runStep.findMany({
+      where: { runId, kind: { in: ["DETERMINISTIC", "DELIVERABLE"] } },
+      orderBy: { index: "asc" },
+      select: { componentId: true, kind: true, output: true },
+    }),
+  ]);
+  const searches: string[] = [];
+  const hosts: string[] = [];
+  const datasets: string[] = [];
+  let pagesRead = 0;
+  let extractions = 0;
+  for (const call of calls) {
+    const input = record(call.input);
+    if (call.toolName === "web_search" && typeof input?.query === "string") searches.push(input.query);
+    if (call.toolName === "fetch_url") {
+      pagesRead += 1;
+      const host = hostOf(input?.url);
+      if (host && !hosts.includes(host)) hosts.push(host);
+    }
+    if (call.toolName === "read_dataset" && typeof input?.dataset === "string" && !datasets.includes(input.dataset)) datasets.push(input.dataset);
+    if (call.toolName === "extract_data") extractions += 1;
+  }
+  const cleaning = steps.filter((s) => s.kind === "DETERMINISTIC" && (s.componentId === "validate_records" || s.componentId === "dedupe"));
+  const first = record(cleaning[0]?.output);
+  const last = record(cleaning[cleaning.length - 1]?.output);
+  const delivered = numberOf(record(steps.find((s) => s.kind === "DELIVERABLE")?.output)?.records);
+  return {
+    runId,
+    at,
+    searches,
+    pagesRead,
+    hosts,
+    datasets,
+    extractions,
+    collected: numberOf(first?.before),
+    kept: numberOf(last?.after),
+    checks: cleaning.map((s) => s.componentId ?? "").filter((id) => id.length > 0),
+    delivered,
   };
 }
 
@@ -155,7 +236,7 @@ export function scheduleSentence(ctx: WorkerChatContext): string {
   if (ctx.cadence.kind === "manual") return "I run on demand — start a run whenever you need one.";
   const cadence = describeCadence(ctx.cadence);
   const next = ctx.worker.nextRunAt ? `; my next run is ${dateTime(ctx.worker.nextRunAt)}` : "";
-  return `I'm scheduled ${cadence.charAt(0).toLowerCase()}${cadence.slice(1)}${next}.`;
+  return `I'm scheduled ${lowerFirst(cadence)}${next}.`;
 }
 
 /** The fact sheet the live model answers from. Plain text, no markdown headings (the reply must not use them either). */
@@ -175,7 +256,17 @@ export function renderContextForPrompt(ctx: WorkerChatContext): string {
   lines.push(`Score: ${ctx.score.score === null ? "none yet" : `${Math.round(ctx.score.score)}/100 over ${ctx.score.sampleSize.runs} runs`}`);
   for (const kpi of m.kpis) {
     if (kpi.actual === null) continue;
-    lines.push(`KPI ${kpi.name}: ${kpi.actual} vs target ${kpi.target} ${kpi.unit} → ${kpi.met ? "met" : "missed"}`);
+    lines.push(`KPI ${kpi.name}: ${formatKpiValue(kpi.actual, kpi.unit)} vs target ${formatKpiValue(kpi.target, kpi.unit)} → ${kpi.met ? "met" : "missed"}`);
+  }
+  const method = ctx.lastRunMethod;
+  if (method) {
+    const read = [
+      method.searches.length > 0 ? `${method.searches.length} web searches (${method.searches.slice(0, 3).map((q) => `“${clip(q, 60)}”`).join(", ")})` : null,
+      method.pagesRead > 0 ? `${method.pagesRead} pages read on ${method.hosts.join(", ") || "the web"}` : null,
+      method.datasets.length > 0 ? `datasets: ${method.datasets.join(", ")}` : null,
+      method.collected !== null && method.kept !== null ? `${method.kept} of ${method.collected} records kept after cleaning` : null,
+    ].filter((x): x is string => x !== null);
+    if (read.length > 0) lines.push("", `How the last successful run (${shortDate(method.at)}) worked: ${read.join("; ")}`);
   }
   if (ctx.activeInstructions.length > 0) lines.push("", `One-off instructions waiting for the next run: ${ctx.activeInstructions.map((i) => `“${clip(i, 120)}”`).join("; ")}`);
   if (ctx.pendingProposal) lines.push(`A proposed version ${ctx.pendingProposal.version} is awaiting the manager's decision.`);

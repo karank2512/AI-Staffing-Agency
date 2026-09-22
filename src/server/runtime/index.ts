@@ -14,4 +14,12 @@ export { decideApproval } from "./approvals";
 export { tickScheduler } from "./scheduler";
 export { startExecutor, stopExecutor } from "./executor";
 
+// Pure helpers the demo seed replays runs with, so seeded history uses the engine's own prompts, clipping,
+// titles, report builder and error text instead of re-implementing (and drifting from) them.
+export { compact, oneLine } from "./compact";
+export { deliverableSummary, narrativeSummary, renderTitle } from "./deliverable";
+export { DECLINED_MESSAGE } from "./approvals";
+export { runDeterministic, type ReportMeta } from "./deterministic";
+export { buildInitialMessage, buildSystemPrompt, repairPrompt } from "./messages";
+
 export * from "./types";

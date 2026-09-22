@@ -177,7 +177,7 @@ export default async function CostTab({ session, workerId, workerName }: WorkerT
                 </TableHeader>
                 <TableBody>
                   {cost.byResource.map((r) => (
-                    <TableRow key={`${r.kind}:${r.label}`}>
+                    <TableRow key={`${r.kind}:${r.resource}`}>
                       <TableCell>
                         <span className="flex items-center gap-2">
                           <Badge variant="outline" className={cn("gap-1", r.kind === "MODEL" ? "text-chart-1" : "text-chart-2")}>
@@ -185,6 +185,7 @@ export default async function CostTab({ session, workerId, workerName }: WorkerT
                             {r.kind === "MODEL" ? "Model" : "Tool"}
                           </Badge>
                           <span className="font-medium">{r.label}</span>
+                          {r.label !== r.resource ? <span className="font-mono text-xs text-muted-foreground">{r.resource}</span> : null}
                           {cost.simulated && r.kind === "MODEL" ? <SimulatedBadge /> : null}
                         </span>
                       </TableCell>

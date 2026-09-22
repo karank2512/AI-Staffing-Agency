@@ -1,12 +1,17 @@
 import type { SimFeedbackItem } from "@/server/simulation/types";
-import { companyEntities, type CompanyEntity } from "./fixtures/companies";
+import { countryOfLocation, regionOfCountry, type Sector } from "./constraints";
+import { type CompanyEntity } from "./fixtures/companies";
 import { FEEDBACK_ACTIONS, feedbackItems, type FeedbackCategory } from "./fixtures/feedback";
+import { expenseItems, type SimExpense } from "./fixtures/finance";
+import { allCompanyEntities } from "./fixtures/fintech";
 import { companyPeople } from "./fixtures/people";
 import { pricingFor, type PricingPlan } from "./fixtures/pricing";
 import { TICKET_ROUTING, ticketItems, type SimTicket, type TicketCategory } from "./fixtures/tickets";
 import type { EntityKind } from "./fields";
+import { companyPricingFacts, openRoles, planPricingFacts } from "./pricing-facts";
 import { hashSeed, seededInt } from "./rng";
 import { clip, escapeRegExp, formatUsdShort } from "./text";
+import { fixtureSlugOf, mentionedVendorSlugs, syntheticVendor, vendorDisplayName, vendorSlug, type SyntheticVendor } from "./vendors";
 
 /**
  * "Facts" = everything the simulation knows about one fixture entity, keyed by the canonical names in
@@ -22,26 +27,8 @@ export interface EntityRef {
   facts: Facts;
 }
 
-const REGION_BY_COUNTRY: Record<string, string> = {
-  "United States": "North America",
-  Canada: "North America",
-  "United Kingdom": "Europe",
-  Germany: "Europe",
-  France: "Europe",
-  Sweden: "Europe",
-  Switzerland: "Europe",
-  Netherlands: "Europe",
-  Ireland: "Europe",
-  Israel: "Middle East",
-  India: "Asia-Pacific",
-  Singapore: "Asia-Pacific",
-};
-
 function countryOf(hq: string): string {
-  const tail = hq.split(",").pop()?.trim() ?? hq;
-  if (tail === "UK") return "United Kingdom";
-  // "Austin, TX" / "Washington, DC" → any other two-letter code is a US state.
-  return /^[A-Z]{2}$/.test(tail) ? "United States" : tail;
+  return countryOfLocation(hq) ?? (hq.split(",").pop()?.trim() || hq);
 }
 
 const STAGE_FIT_BONUS: Record<string, number> = { Seed: 0, "Series A": 8, "Series B": 12, "Series C": 6 };
@@ -67,7 +54,7 @@ export function companyFacts(c: CompanyEntity): Facts {
     lead_investor: c.lead_investor,
     hq: c.hq,
     country,
-    region: REGION_BY_COUNTRY[country] ?? "Other",
+    region: regionOfCountry(country) ?? "Other",
     employees: c.employees,
     founded_year: 2019 + seededInt(hashSeed(`${c.slug}|founded`), 0, 4),
     notes: `${amountLabel} ${c.stage} led by ${c.lead_investor} — a signal of investor appetite for ${categoryLower}; ${c.company} now has about ${c.employees} people.`,
@@ -77,11 +64,8 @@ export function companyFacts(c: CompanyEntity): Facts {
     contact_email: people.buyer.email,
     linkedin_url: people.buyer.linkedin_url,
     fit_score: fitScore,
-    pricing_model: pricing.pricing_model,
-    starting_price_usd: pricing.starting_price_usd,
-    free_tier: pricing.free_tier,
-    plans: pricing.plans.map((p) => p.name).join(", "),
-    pricing_url: pricing.pricing_url,
+    open_roles: openRoles(c.slug, c.employees),
+    ...companyPricingFacts(c.slug, pricing),
   };
 }
 
@@ -90,11 +74,30 @@ export function planFacts(c: CompanyEntity, plan: PricingPlan): Facts {
   return {
     ...companyFacts(c),
     source_url: pricingFor(c).pricing_url,
-    plan: plan.name,
-    starting_price_usd: plan.price_usd,
-    price_unit: plan.unit,
-    plan_includes: plan.includes,
+    monthly_price_note: null,
+    ...planPricingFacts(c.slug, plan),
   };
+}
+
+/**
+ * A vendor the customer named that the fixture universe does not have: only what its (simulated) pricing page
+ * says. No funding, headcount or people are invented for it — those fields stay null.
+ */
+export function vendorFacts(v: SyntheticVendor): Facts {
+  return {
+    company: v.company,
+    website: v.website,
+    source_url: v.pricing.pricing_url,
+    category: v.category,
+    description: `${v.company} sells ${v.pricing.pricing_model.toLowerCase()} plans (illustrative prices in Simulated mode).`,
+    notes: `${v.company}: ${v.pricing.plans.length} published plans, ${v.pricing.free_tier ? "including a free tier" : "no free tier"}.`,
+    open_roles: openRoles(v.slug, null),
+    ...companyPricingFacts(v.slug, v.pricing),
+  };
+}
+
+export function vendorPlanFacts(v: SyntheticVendor, plan: PricingPlan): Facts {
+  return { ...vendorFacts(v), monthly_price_note: null, ...planPricingFacts(v.slug, plan) };
 }
 
 const SENTIMENT_SCORE: Record<SimFeedbackItem["sentiment"], number> = { positive: 0.8, neutral: 0, negative: -0.7 };
@@ -120,6 +123,33 @@ export function feedbackFacts(f: SimFeedbackItem): Facts {
     summary: firstSentence(f.text),
     suggested_action: routing?.action ?? null,
     owner_team: routing?.team ?? null,
+  };
+}
+
+export function expenseFacts(e: SimExpense): Facts {
+  const utilization = e.seats && e.active_seats !== null ? Math.round((e.active_seats / e.seats) * 100) / 100 : null;
+  return {
+    id: e.id,
+    invoice_number: e.invoice_number ?? e.id,
+    date: e.date,
+    vendor: e.vendor,
+    product: e.product,
+    category: e.category,
+    amount_usd: e.amount_usd,
+    billing_cycle: e.billing_cycle,
+    owner: e.owner,
+    team: e.team,
+    seats: e.seats,
+    active_seats: e.active_seats,
+    seat_utilization: utilization,
+    renewal_date: e.renewal_date,
+    payment_method: e.payment_method,
+    status: e.status,
+    flag_reason: e.flag_reason,
+    notes: e.notes,
+    source_url: e.group === "software" ? "https://finance.example/acme/saas" : "https://finance.example/acme/spend",
+    group: e.group,
+    kind: e.kind,
   };
 }
 
@@ -149,8 +179,7 @@ interface Mention<T> {
   at: number;
 }
 
-/** Companies named in `text` (by name or by their `.example` host), in order of first mention. */
-export function mentionedCompanies(text: string, companies: readonly CompanyEntity[]): CompanyEntity[] {
+function companyMentions(text: string, companies: readonly CompanyEntity[]): Array<Mention<CompanyEntity>> {
   const lower = text.toLowerCase();
   const hits: Array<Mention<CompanyEntity>> = [];
   for (const c of companies) {
@@ -159,11 +188,19 @@ export function mentionedCompanies(text: string, companies: readonly CompanyEnti
     const positions = [byName, byHost].filter((p) => p >= 0);
     if (positions.length > 0) hits.push({ item: c, at: Math.min(...positions) });
   }
-  return hits.sort((a, b) => a.at - b.at).map((h) => h.item);
+  return hits.sort((a, b) => a.at - b.at);
+}
+
+/** Companies named in `text` (by name or by their `.example` host), in order of first mention. */
+export function mentionedCompanies(text: string, companies: readonly CompanyEntity[]): CompanyEntity[] {
+  return companyMentions(text, companies).map((h) => h.item);
 }
 
 export const FEEDBACK_ID_RE = /\bFB-\d{4}\b/gi;
 export const TICKET_ID_RE = /\bTCK-\d{4}\b/gi;
+export const EXPENSE_ID_RE = /\bTXN-\d{4}\b/gi;
+
+const ID_RE: Record<Exclude<EntityKind, "company">, RegExp> = { feedback: FEEDBACK_ID_RE, ticket: TICKET_ID_RE, expense: EXPENSE_ID_RE };
 
 /** Distinct ids matching `pattern`, lower-cased, in order of first mention. */
 export function mentionedIds(text: string, pattern: RegExp): string[] {
@@ -174,20 +211,34 @@ export function mentionedIds(text: string, pattern: RegExp): string[] {
 
 /** Everything the simulation "knows", resolved against one clock reading. Build once per call. */
 export class EntityIndex {
+  /** Every simulated company, whatever its sector — mentions and records resolve against all of them. */
   readonly companies: CompanyEntity[];
   readonly feedback: SimFeedbackItem[];
   readonly tickets: SimTicket[];
+  readonly expenses: SimExpense[];
+  /** Vendors the spec names, in the customer's spelling (used for display names of synthetic vendors). */
+  readonly vendorNames: readonly string[];
   private readonly byKey = new Map<string, EntityRef>();
+  /** Synthetic vendors seen so far, by slug. */
+  private readonly vendors = new Map<string, SyntheticVendor>();
 
-  constructor(now: Date) {
-    this.companies = companyEntities(now);
+  constructor(now: Date, opts: { vendorNames?: readonly string[] } = {}) {
+    this.companies = allCompanyEntities(now);
     this.feedback = feedbackItems(now);
     this.tickets = ticketItems(now);
+    this.expenses = expenseItems(now);
+    this.vendorNames = opts.vendorNames ?? [];
+  }
+
+  /** The companies of one universe, newest round first. */
+  companiesIn(sector: Sector): CompanyEntity[] {
+    return this.companies.filter((c) => c.sector === sector);
   }
 
   refs(kind: EntityKind): EntityRef[] {
     if (kind === "company") return this.companies.map((c) => this.companyRef(c));
     if (kind === "feedback") return this.feedback.map((f) => this.memo(`feedback:${f.id}`, () => ({ kind: "feedback", key: f.id.toLowerCase(), facts: feedbackFacts(f) })));
+    if (kind === "expense") return this.expenses.map((e) => this.memo(`expense:${e.id}`, () => ({ kind: "expense", key: e.id.toLowerCase(), facts: expenseFacts(e) })));
     return this.tickets.map((t) => this.memo(`ticket:${t.id}`, () => ({ kind: "ticket", key: t.id.toLowerCase(), facts: ticketFacts(t) })));
   }
 
@@ -195,10 +246,48 @@ export class EntityIndex {
     return this.memo(`company:${c.slug}`, () => ({ kind: "company", key: c.company.toLowerCase(), facts: companyFacts(c) }));
   }
 
+  /** The synthetic vendor behind `slug`, named by the spec's spelling, the text's own casing, or the slug. */
+  vendor(slug: string, text?: string): SyntheticVendor {
+    let v = this.vendors.get(slug);
+    if (!v) {
+      v = syntheticVendor(vendorDisplayName(slug, { known: this.vendorNames, text }));
+      this.vendors.set(slug, v);
+    }
+    return v;
+  }
+
+  vendorRef(v: SyntheticVendor): EntityRef {
+    return this.memo(`vendor:${v.slug}`, () => ({ kind: "company", key: v.company.toLowerCase(), facts: vendorFacts(v) }));
+  }
+
+  /** The spec's named vendors as refs, in the spec's order: fixture companies as themselves, the rest synthetic. */
+  namedRefs(): EntityRef[] {
+    return this.vendorNames.map((name) => {
+      const slug = fixtureSlugOf(name);
+      const fixture = slug ? this.companies.find((c) => c.slug === slug) : undefined;
+      return fixture ? this.companyRef(fixture) : this.vendorRef(this.vendor(vendorSlug(name)));
+    });
+  }
+
+  /** One facts object per published plan (company × plan rows), or null for entities without a price list. */
+  planFactsFor(ref: EntityRef): Facts[] | null {
+    if (ref.kind !== "company") return null;
+    const company = this.companies.find((c) => c.company.toLowerCase() === ref.key);
+    if (company) return pricingFor(company).plans.map((plan) => planFacts(company, plan));
+    const v = [...this.vendors.values()].find((x) => x.company.toLowerCase() === ref.key);
+    return v ? v.pricing.plans.map((plan) => vendorPlanFacts(v, plan)) : null;
+  }
+
   /** Entities of `kind` mentioned in free text (page bodies, search snippets), in order of first mention. */
   mentioned(text: string, kind: EntityKind): EntityRef[] {
-    if (kind === "company") return mentionedCompanies(text, this.companies).map((c) => this.companyRef(c));
-    const ids = mentionedIds(text, kind === "feedback" ? FEEDBACK_ID_RE : TICKET_ID_RE);
+    if (kind === "company") {
+      const lower = text.toLowerCase();
+      const hits: Array<Mention<EntityRef>> = companyMentions(text, this.companies).map((h) => ({ item: this.companyRef(h.item), at: h.at }));
+      // Named vendors outside the fixtures are recognised by their (simulated) pricing page URL.
+      for (const slug of mentionedVendorSlugs(text)) hits.push({ item: this.vendorRef(this.vendor(slug, text)), at: lower.indexOf(`${slug}.example/pricing`) });
+      return hits.sort((a, b) => a.at - b.at).map((h) => h.item);
+    }
+    const ids = mentionedIds(text, ID_RE[kind]);
     const byKey = new Map(this.refs(kind).map((r) => [r.key, r]));
     return ids.flatMap((id) => {
       const ref = byKey.get(id);
@@ -213,11 +302,19 @@ export class EntityIndex {
       const id = s.trim().toUpperCase();
       if (/^FB-\d+$/.test(id)) return this.refs("feedback").find((r) => r.key === id.toLowerCase()) ?? null;
       if (/^TCK-\d+$/.test(id)) return this.refs("ticket").find((r) => r.key === id.toLowerCase()) ?? null;
+      if (/^TXN-\d+$/.test(id)) return this.refs("expense").find((r) => r.key === id.toLowerCase()) ?? null;
     }
     for (const s of strings) {
       const name = s.trim().toLowerCase();
       const hit = this.companies.find((c) => c.company.toLowerCase() === name);
       if (hit) return this.companyRef(hit);
+    }
+    // A synthetic vendor only when it is already known (seen on the web or named in the spec) — never invented here.
+    for (const s of strings) {
+      const bySlug = mentionedVendorSlugs(s)[0];
+      if (bySlug) return this.vendorRef(this.vendor(bySlug));
+      const slug = vendorSlug(s.trim());
+      if (slug && (this.vendors.has(slug) || this.vendorNames.some((n) => vendorSlug(n) === slug)) && !fixtureSlugOf(s)) return this.vendorRef(this.vendor(slug));
     }
     return null;
   }

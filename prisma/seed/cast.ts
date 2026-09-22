@@ -74,11 +74,25 @@ function chat(env: SeedEnv, seat: Seat, at: Date, content: string): Action {
   };
 }
 
+/**
+ * generatePerformanceReview refuses (CONFLICT) a worker whose current version has no evaluated run yet, so a
+ * review is only ever planned after one. This check makes a mis-ordered timeline fail with the action's name
+ * instead of a CONFLICT from inside the review.
+ */
+export async function assertEvaluatedBefore(env: SeedEnv, seat: Seat, at: Date): Promise<void> {
+  const evaluated = await env.db.evaluation.findFirst({
+    where: { organizationId: seat.organizationId, workerId: seat.workerId, workerVersionId: seat.versionId, runId: { not: null }, createdAt: { lte: at } },
+    select: { id: true },
+  });
+  if (!evaluated) throw new Error(`${seat.workerName}'s performance review at ${at.toISOString()} is planned before any of their runs was evaluated`);
+}
+
 function performanceReview(env: SeedEnv, seat: Seat, at: Date): Action {
   return {
     at,
     label: `${seat.workerName}: performance review`,
     run: async () => {
+      await assertEvaluatedBefore(env, seat, at);
       await backdate(env.db, seat.organizationId, at, () => generatePerformanceReview(env.session, seat.workerId));
     },
   };

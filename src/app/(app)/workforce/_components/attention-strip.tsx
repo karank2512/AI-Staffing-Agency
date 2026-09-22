@@ -78,7 +78,10 @@ function AttentionRow({ item }: { item: AttentionItem }) {
               </Link>
             </>
           }
-          actions={<ApprovalDecision approvalId={item.approvalId} workerName={item.workerName} toolLabel={item.toolLabel} size="sm" />}
+          actions={
+            // The row only has room for a summary, so the Approve confirmation carries the full payload.
+            <ApprovalDecision approvalId={item.approvalId} workerName={item.workerName} toolLabel={item.toolLabel} payload={item.payload} size="sm" />
+          }
         />
       );
     case "health":

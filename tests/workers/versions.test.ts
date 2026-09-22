@@ -175,6 +175,34 @@ describe("worker versions", () => {
       expect((await loadWorkerRow(hired.worker.id)).currentVersionId).toBe(proposed.versionId);
     });
 
+    it("cancels runs still queued on the outgoing version, so none runs on the replaced design", async () => {
+      // A retry waiting out its backoff and a run released by an approval, both pinned to v1.
+      const retry = await createRun(hired, { status: "QUEUED" });
+      const released = await createRun(hired, { status: "QUEUED" });
+      const proposed = await createProposedVersion({ organizationId: t.organization.id, workerId: hired.worker.id, blueprint: hired.blueprint, changeReason: "REPLACEMENT", changeSummary: "Better design" });
+      await activateVersion(t.session, proposed.versionId);
+
+      for (const run of [retry, released]) {
+        const row = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+        expect(row.status).toBe("CANCELLED");
+        expect(row.workerVersionId).toBe(hired.version.id);
+      }
+      expect(await db.run.count({ where: { workerId: hired.worker.id, status: "QUEUED" } })).toBe(0);
+      expect(await activityOf(t.organization.id, hired.worker.id, "RUN_CANCELLED")).toHaveLength(2);
+      const replaced = await activityOf(t.organization.id, hired.worker.id, "WORKER_REPLACED");
+      expect(replaced[0].detail).toContain("cancelled 2 queued runs of the previous version");
+      expect((await loadWorkerRow(hired.worker.id)).currentVersionId).toBe(proposed.versionId);
+    });
+
+    it("leaves queued runs alone when the activation is refused", async () => {
+      const queued = await createRun(hired, { status: "QUEUED" });
+      await createRun(hired, { status: "WAITING_FOR_APPROVAL" });
+      const proposed = await createProposedVersion({ organizationId: t.organization.id, workerId: hired.worker.id, blueprint: hired.blueprint, changeReason: "MANUAL", changeSummary: "" });
+      await expect(activateVersion(t.session, proposed.versionId)).rejects.toMatchObject({ code: "CONFLICT" });
+      expect((await db.run.findUniqueOrThrow({ where: { id: queued.id } })).status).toBe("QUEUED");
+      expect((await loadVersionRow(proposed.versionId)).status).toBe("PROPOSED");
+    });
+
     it("keeps a paused worker paused (no nextRunAt)", async () => {
       await db.worker.update({ where: { id: hired.worker.id }, data: { status: "PAUSED", nextRunAt: null } });
       const proposed = await createProposedVersion({ organizationId: t.organization.id, workerId: hired.worker.id, blueprint: hired.blueprint, changeReason: "MANUAL", changeSummary: "" });

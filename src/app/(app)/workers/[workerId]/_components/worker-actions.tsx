@@ -3,10 +3,9 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, ClipboardList, Loader2, Pause, Play, UserMinus } from "lucide-react";
+import { ArrowLeftRight, ChevronDown, ClipboardList, Loader2, MoreHorizontal, Pause, Play, UserMinus } from "lucide-react";
 import { toast } from "sonner";
 import type { WorkerStatus } from "@prisma/client";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,10 +16,18 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { generateReviewAction, pauseWorkerAction, resumeWorkerAction, retireWorkerAction, runNowAction } from "../actions";
+import { pauseWorkerAction, resumeWorkerAction, retireWorkerAction, runNowAction } from "../actions";
+import { useGenerateReview } from "./generate-review";
 
 export interface WorkerActionsProps {
   workerId: string;
@@ -30,20 +37,18 @@ export interface WorkerActionsProps {
   hasCurrentVersion: boolean;
 }
 
-const RECOMMENDATION_COPY = {
-  KEEP: (name: string) => `${name} is doing well — keep going.`,
-  IMPROVE: (name: string) => `${name} could do better — see what to change.`,
-  REPLACE: (name: string) => `The review recommends replacing ${name}.`,
-} as const;
-
-/** Header controls: Run now (with one-off instructions), Pause / Resume, Performance review, Replace, Retire. */
+/**
+ * Header controls. "Run now" (with one-off instructions) is the one primary button; Performance review, Replace,
+ * Pause / Resume and Retire live in a "More" menu so five buttons never squeeze the worker's name into a sliver.
+ */
 export function WorkerActions({ workerId, workerName, status, hasCurrentVersion }: WorkerActionsProps) {
   const router = useRouter();
   const [runOpen, setRunOpen] = useState(false);
+  const [retireOpen, setRetireOpen] = useState(false);
   const [instructions, setInstructions] = useState("");
   const [running, startRun] = useTransition();
   const [toggling, startToggle] = useTransition();
-  const [reviewing, startReview] = useTransition();
+  const { reviewing, generate: review } = useGenerateReview(workerId, workerName);
 
   const retired = status === "RETIRED";
   const paused = status === "PAUSED";
@@ -87,21 +92,6 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
     });
   }
 
-  function review() {
-    startReview(async () => {
-      const r = await generateReviewAction(workerId);
-      if (!r.ok) {
-        toast.error(r.error);
-        return;
-      }
-      toast.success(`Performance review ready — ${Math.round(r.data.overallScore)}/100`, {
-        description: RECOMMENDATION_COPY[r.data.recommendation](workerName),
-      });
-      router.push(`/workers/${workerId}?tab=performance`);
-      router.refresh();
-    });
-  }
-
   const runButton = (
     <Button disabled={!canRun || running} onClick={canRun ? () => setRunOpen(true) : undefined}>
       {running ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Play aria-hidden="true" />}
@@ -109,25 +99,51 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
     </Button>
   );
 
+  const busy = reviewing || toggling;
+
   return (
     <>
-      {!retired ? (
-        <ConfirmDialog
-          trigger={
-            <Button variant="destructive">
-              <UserMinus aria-hidden="true" />
-              Retire
-            </Button>
-          }
-          title={`Retire ${workerName}?`}
-          description={
+      {/* Non-modal so a menu item can open the Retire dialog without Radix leaving the page unclickable. */}
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" aria-label={`More actions for ${workerName}`}>
+            {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <MoreHorizontal aria-hidden="true" />}
+            More
+            <ChevronDown className="opacity-60" aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-52">
+          <DropdownMenuItem disabled={reviewing || !hasCurrentVersion} onSelect={review}>
+            {reviewing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ClipboardList aria-hidden="true" />}
+            Performance review
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild>
+            <Link href={`/workers/${workerId}?tab=versions#replace`}>
+              <ArrowLeftRight aria-hidden="true" />
+              Replace {workerName}
+            </Link>
+          </DropdownMenuItem>
+          {!retired ? (
             <>
-              Queued runs and pending approvals are cancelled and the schedule stops. {workerName}&apos;s history, deliverables and
-              reviews are kept, and the job can be re-staffed later.
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={toggling} onSelect={togglePause}>
+                {toggling ? <Loader2 className="animate-spin" aria-hidden="true" /> : paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+                {paused ? "Resume" : "Pause"}
+              </DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onSelect={() => setRetireOpen(true)}>
+                <UserMinus aria-hidden="true" />
+                Retire…
+              </DropdownMenuItem>
             </>
-          }
-          confirmLabel="Retire worker"
-          destructive
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {!retired ? (
+        <RetireDialog
+          open={retireOpen}
+          onOpenChange={setRetireOpen}
+          workerName={workerName}
           onConfirm={async () => {
             const r = await retireWorkerAction(workerId);
             if (!r.ok) throw new Error(r.error);
@@ -135,25 +151,6 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
             router.refresh();
           }}
         />
-      ) : null}
-
-      <Button variant="outline" asChild>
-        <Link href={`/workers/${workerId}?tab=versions#replace`}>
-          <ArrowLeftRight aria-hidden="true" />
-          Replace
-        </Link>
-      </Button>
-
-      <Button variant="outline" disabled={reviewing || !hasCurrentVersion} onClick={review}>
-        {reviewing ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ClipboardList aria-hidden="true" />}
-        Performance review
-      </Button>
-
-      {!retired ? (
-        <Button variant="outline" disabled={toggling} onClick={togglePause}>
-          {toggling ? <Loader2 className="animate-spin" aria-hidden="true" /> : paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
-          {paused ? "Resume" : "Pause"}
-        </Button>
       ) : null}
 
       <Dialog open={runOpen} onOpenChange={(next) => (running ? undefined : setRunOpen(next))}>
@@ -209,5 +206,64 @@ export function WorkerActions({ workerId, workerName, status, hasCurrentVersion 
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/**
+ * Controlled twin of ConfirmDialog (which owns its trigger and so cannot be opened from a menu item). While the
+ * retirement is in flight the dialog cannot be dismissed — the outcome must land.
+ */
+function RetireDialog({
+  open,
+  onOpenChange,
+  workerName,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  workerName: string;
+  onConfirm: () => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+
+  async function confirm() {
+    if (pending) return;
+    setPending(true);
+    try {
+      await onConfirm();
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(e instanceof Error && e.message ? e.message : "Something went wrong. Please try again.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
+      <DialogContent showCloseButton={false} className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Retire {workerName}?</DialogTitle>
+          <DialogDescription>
+            Queued runs and pending approvals are cancelled and the schedule stops. {workerName}&apos;s history, deliverables and
+            reviews are kept, and the job can be re-staffed later.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            disabled={pending}
+            onClick={confirm}
+            className="bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/30"
+          >
+            {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : <UserMinus aria-hidden="true" />}
+            Retire worker
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

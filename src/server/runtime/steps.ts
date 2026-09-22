@@ -32,6 +32,12 @@ export interface FinishStepArgs {
   error?: string;
   detail?: string;
   title?: string;
+  /**
+   * Override for the step's duration. Default: finishedAt − startedAt. A tool call that waited for a human (or
+   * was resumed by a later slice) passes its own execution time instead, so the timeline never shows the wait.
+   * `null` = no meaningful duration (the tool never ran).
+   */
+  durationMs?: number | null;
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -80,7 +86,7 @@ export class StepWriter {
     return {
       status: args.status,
       finishedAt: now,
-      durationMs: Math.max(0, now.getTime() - step.startedAt.getTime()),
+      durationMs: args.durationMs !== undefined ? (args.durationMs === null ? null : Math.max(0, Math.round(args.durationMs))) : Math.max(0, now.getTime() - step.startedAt.getTime()),
       ...(args.output === undefined ? {} : { output: toJson(compact(args.output)) }),
       ...(args.error === undefined ? {} : { error: clipText(args.error, 2_000) }),
       ...(args.detail === undefined ? {} : { detail: args.detail }),

@@ -163,8 +163,8 @@ Safe renderer for deliverables, reviews, chat replies: headings, paragraphs, nes
 <Card><CardContent><Markdown content={deliverable.content} /></CardContent></Card>
 ```
 
-### DataTable — `{ rows, columns?, maxRows? }`
-`rows`: `Array<Record<string, unknown>>` · `columns`: key order (default: all keys, first-seen) · `maxRows`: default 50. Humanized headers (`source_url` → "Source URL"), grouped right-aligned numbers (years/ids ungrouped), short external links for URLs, "Yes/No", ISO dates, "—" for empty, sticky header, horizontal scroll, "Showing N of M records" footer. Read-only, for worker-produced records; for app entities (runs, jobs, approvals) build a real table with `@/components/ui/table`.
+### DataTable — `{ rows, columns?, maxRows?, showIndex? }`
+`rows`: `Array<Record<string, unknown>>` · `columns`: key order (default: all keys, first-seen) · `maxRows`: default 50 · `showIndex`: default `true` — pass `false` when the records already carry a `rank` column. Humanized headers (`source_url` → "Source URL"), grouped right-aligned numbers (years/ids ungrouped), short external links for URLs, "Yes/No", ISO dates, "—" for empty, sticky header, horizontal scroll, "Showing N of M records" footer. Read-only, for worker-produced records; for app entities (runs, jobs, approvals) build a real table with `@/components/ui/table`.
 ```tsx
 <DataTable rows={deliverable.data} maxRows={100} />
 ```

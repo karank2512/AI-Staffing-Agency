@@ -2,7 +2,7 @@ import type { AgentComponent } from "@/server/domain/blueprint";
 import type { JobFamily } from "@/server/domain/job-family";
 import { renderJobBrief, type JobSpec } from "@/server/domain/job-spec";
 import type { ChatMessage, ToolCallRequest, ToolSpec } from "@/server/models/types";
-import { createSimulation } from "@/server/simulation";
+import { createSimulation, type AgentTurnHints } from "@/server/simulation";
 import type { MockAgentTurnInput, Simulation } from "@/server/simulation/types";
 import { TOOL_INPUT_SCHEMAS, type ToolName } from "@/server/tools/schemas";
 import { makeBlueprint, makeJobSpec } from "../helpers/fixtures";
@@ -46,6 +46,8 @@ export interface AgentSetup {
   context?: Record<string, unknown>;
   /** Restrict the offered tools (default: the component's tools). */
   tools?: string[];
+  /** Blueprint-derived extras, spread into the input the way the runtime does (see agentTurnHints). */
+  hints?: AgentTurnHints;
 }
 
 export function agentInput(setup: AgentSetup, messages?: ChatMessage[]): MockAgentTurnInput {
@@ -60,6 +62,7 @@ export function agentInput(setup: AgentSetup, messages?: ChatMessage[]): MockAge
     system: setup.component.instructions,
     messages: messages ?? [{ role: "user", content: initialMessage(spec, instructions, setup.context) }],
     tools: toolSpecs(setup.tools ?? setup.component.tools),
+    ...setup.hints,
   };
 }
 

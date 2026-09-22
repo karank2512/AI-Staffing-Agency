@@ -1,7 +1,6 @@
 import {
   JOB_FAMILY_INFO,
   JobSpecSchema,
-  detectJobFamily,
   type IntakeAnswers,
   type JobFamily,
   type JobSpec,
@@ -20,7 +19,14 @@ import {
   extractEmails,
   mentionsSending,
 } from "./cues";
+import { KEEP_IN_WORKSPACE, jobObject } from "./describe";
+import { detectFamily } from "./family-cues";
 import { FAMILY_PROFILES } from "./families";
+import { impliedAnswers, scopingQuestionsFor } from "./questions";
+import { specFields, specResponsibilities } from "./spec-fields";
+import { draftTitleFrom } from "./title";
+
+export { draftTitleFrom };
 
 /**
  * The simulated scoper: deterministic follow-up questions and a JobSpec built from the description plus the
@@ -28,24 +34,12 @@ import { FAMILY_PROFILES } from "./families";
  * recipients, format words — so the spec visibly reflects what the customer said.
  */
 
-const FILLER_PREFIX =
-  /^(?:(?:hi|hello|hey)[,!.\s]+)?(?:please\s+)?(?:(?:i|we)\s+(?:need|want|would like|'d like|am looking for|are looking for|require)\s+)?(?:(?:an?|the)\s+)?(?:ai\s+)?(?:worker|agent|assistant|bot|someone|somebody|help)?\s*(?:to|that|who|which|can|will)?\s*(?:help\s+(?:me|us)\s+)?/i;
-
-/** A working title from the first sentence, minus "I need someone to…" preambles. */
-export function draftTitleFrom(description: string, family: JobFamily): string {
-  const first = description.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+|\n/)[0] ?? "";
-  const stripped = first.replace(FILLER_PREFIX, "").replace(/[.!?]+$/, "").trim();
-  const candidate = stripped.length >= 8 ? stripped : first.trim();
-  const title = clipText(candidate.charAt(0).toUpperCase() + candidate.slice(1), 80);
-  return title.length >= 3 ? title : `${JOB_FAMILY_INFO[family].label} worker`;
-}
-
 export function mockScopingQuestions(description: string): ScopingQuestions {
-  const jobFamily = detectJobFamily(description);
+  const jobFamily = detectFamily(description);
   return {
     draftTitle: draftTitleFrom(description, jobFamily),
     jobFamily,
-    questions: FAMILY_PROFILES[jobFamily].questions.slice(0, 3),
+    questions: scopingQuestionsFor(jobFamily, description),
   };
 }
 
@@ -65,8 +59,6 @@ function answersOf(intake: IntakeAnswers | null): Record<string, string> {
   }
   return out;
 }
-
-const KEEP_IN_WORKSPACE = /\b(just me|only me|in the workspace|workspace only|no(?:body| one) else|keep it here|i'?ll (?:import|download|pick it up))\b/i;
 
 /** Which free-text answers become constraints ("Focus: …") and which describe an input source. */
 const CONSTRAINT_ANSWERS: Record<string, string> = {
@@ -89,17 +81,28 @@ const INPUT_ANSWERS: Record<string, { name: string; source: SpecInput["source"] 
   audience: { name: "Content brief", source: "user_instruction" },
 };
 
+/** Typical plans per vendor pricing page: "five competitors" at plan level is about fifteen rows. */
+const PLANS_PER_VENDOR = 3;
+
 export function mockJobSpec(args: MockSpecArgs): JobSpec {
   const family = args.jobFamily;
   const profile = FAMILY_PROFILES[family];
-  const answers = answersOf(args.intake);
+  const asked = (args.intake?.questions ?? []).map((q) => q.id);
+  // What the description already answered fills in for the questions that were skipped; real answers win.
+  const answers = { ...impliedAnswers(family, args.description, asked), ...answersOf(args.intake) };
   const everything = [args.description, ...Object.values(answers)].join("\n");
 
   // A direct answer to "how often?" wins over cadence words elsewhere; otherwise read everything the customer wrote.
   const impliedCadence = detectCadence([args.description, ...Object.values(answers)].join("\n"), FAMILY_DEFAULT_CADENCE[family]);
   const cadence = answers.cadence ? detectCadence(answers.cadence, impliedCadence) : impliedCadence;
   const format = detectFormat([answers.format ?? "", answers.recipients ?? "", args.description].join("\n"), JOB_FAMILY_INFO[family].defaultDeliverableFormat);
-  const targetCount = detectCount(answers.volume ?? "") ?? detectCount(args.description) ?? profile.targetCount;
+  const fields = specFields({ description: args.description, family, format, profile });
+
+  const volumeAnswer = detectCount(answers.volume ?? "");
+  const described = detectCount(args.description);
+  // "Our five competitors" at plan level means rows per plan, not per competitor.
+  const perPlanRows = volumeAnswer === undefined && described !== undefined && fields.perPlan;
+  const targetCount = volumeAnswer ?? (described !== undefined ? (perPlanRows ? described * PLANS_PER_VENDOR : described) : profile.targetCount);
 
   const recipientsAnswer = answers.recipients ?? "";
   const emails = extractEmails(everything);
@@ -130,10 +133,14 @@ export function mockJobSpec(args: MockSpecArgs): JobSpec {
 
   const objective = clipText(args.description, 600);
   const deliverableTitle = clipText(`${CADENCE_ADJECTIVE[cadence.kind]} ${profile.deliverableNoun}`, 120);
-  const described = `${profile.deliverableDescription.charAt(0).toLowerCase()}${profile.deliverableDescription.slice(1)}`;
-  const summary = `${JOB_FAMILY_INFO[family].workerTitle} who delivers ${cadence.kind === "manual" ? "an" : "a"} ${deliverableTitle.toLowerCase()}: ${described}`;
+  const describedDeliverable = `${profile.deliverableDescription.charAt(0).toLowerCase()}${profile.deliverableDescription.slice(1)}`;
+  const summary = `${JOB_FAMILY_INFO[family].workerTitle} who delivers ${cadence.kind === "manual" ? "an" : "a"} ${deliverableTitle.toLowerCase()}: ${describedDeliverable}`;
 
   const criteria = profile.successCriteria.map((c) => (c.metric === "Records per run" ? { ...c, target: `>= ${targetCount}` } : c));
+  const assumptions = [...profile.assumptions];
+  if (perPlanRows) assumptions.push(`About ${PLANS_PER_VENDOR} plans per vendor, so about ${targetCount} plan rows per run.`);
+  const unknown = fields.fields.filter((f) => !f.required && fields.custom && !profile.fields.some((p) => p.name === f.name));
+  if (unknown.length > 0) assumptions.push(`${unknown.map((f) => f.name).join(", ")} ${unknown.length === 1 ? "is" : "are"} filled when the source states it and left empty otherwise.`);
 
   return JobSpecSchema.parse({
     schemaVersion: 1,
@@ -141,13 +148,13 @@ export function mockJobSpec(args: MockSpecArgs): JobSpec {
     jobFamily: family,
     summary,
     objective: objective.length >= 10 ? objective : `${objective} — ${profile.deliverableDescription}`,
-    responsibilities: profile.responsibilities.slice(0, 8),
+    responsibilities: specResponsibilities({ family, profile, object: jobObject(args.description), fields }),
     inputs: inputs.slice(0, 8),
     deliverable: {
       title: deliverableTitle,
       description: profile.deliverableDescription,
       format,
-      fields: profile.fields,
+      fields: fields.fields,
       sections: format === "markdown" ? profile.sections : [],
       targetCount,
     },
@@ -158,6 +165,6 @@ export function mockJobSpec(args: MockSpecArgs): JobSpec {
     toolsLikelyNeeded: toolsLikelyNeeded.slice(0, 12),
     approvalPolicy: { requireApprovalFor, notes },
     budget: detectBudget(everything),
-    assumptions: profile.assumptions.slice(0, 10),
+    assumptions: assumptions.slice(0, 10),
   });
 }

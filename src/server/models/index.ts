@@ -21,6 +21,9 @@ import type {
 
 export type * from "./types";
 
+// ModelCall.request / .response trace shapes, re-exported for the demo seed so seeded traces match live ones.
+export { buildRequestTrace, buildResponseTrace } from "./persist";
+
 const PROVIDERS: Readonly<Record<ProviderId, ModelProvider>> = {
   anthropic: createAiSdkProvider("anthropic"),
   openai: createAiSdkProvider("openai"),

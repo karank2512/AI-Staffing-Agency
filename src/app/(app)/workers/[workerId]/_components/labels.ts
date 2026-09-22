@@ -1,4 +1,4 @@
-import type { DeliverableFormat, EvaluationType, ReviewRecommendation, RunTrigger } from "@prisma/client";
+import type { DeliverableFormat, EvaluationType, ReviewRecommendation, RunTrigger, VersionChangeReason } from "@prisma/client";
 import type { StatusTone } from "@/lib/status";
 
 /** Contractor-style labels for enums the profile shows in several tabs. Pure; safe in client leaves. */
@@ -44,6 +44,21 @@ export const RECOMMENDATION_META: Record<ReviewRecommendation, { label: string; 
   IMPROVE: { label: "Improve", tone: "attention", headline: (name) => `${name} could do better` },
   REPLACE: { label: "Replace", tone: "failure", headline: (name) => `Time to replace ${name}` },
 };
+
+/**
+ * What separates an earlier version's review from the version running today, keyed by the CURRENT version's
+ * change reason: "Review of v1 (before the replacement)".
+ */
+const BEFORE_CHANGE: Record<VersionChangeReason, string> = {
+  REPLACEMENT: "before the replacement",
+  SPEC_CHANGE: "before the latest change",
+  MANUAL: "before the latest change",
+  INITIAL_HIRE: "an earlier version",
+};
+
+export function beforeChangeLabel(currentChangeReason: VersionChangeReason | null | undefined): string {
+  return currentChangeReason ? BEFORE_CHANGE[currentChangeReason] : "an earlier version";
+}
 
 const OPERATION_LABELS: Record<string, string> = {
   validate_records: "Checks required fields",

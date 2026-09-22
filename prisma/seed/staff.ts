@@ -1,7 +1,7 @@
 import type { ActivityType, ActorType, PrismaClient } from "@prisma/client";
 import { toJson } from "@/server/db";
 import { cadenceToWorkerFields, describeCadence, type FollowUpQuestion, type IntakeAnswers, type JobSpec } from "@/server/domain";
-import { oneLine } from "@/server/runtime/compact";
+import { oneLine } from "@/server/runtime";
 import { tools } from "@/server/tools";
 import type { DesignedWorker } from "./blueprints";
 import type { Seat } from "./trace";

@@ -41,12 +41,19 @@ export function WorkerHeader({ worker }: { worker: WorkerHeaderView }) {
           </span>
         }
         description={
+          // One line each: a long job title or persona bio must not stack into a tall block beside the actions.
           <>
-            Hired for{" "}
-            <Link href={`/jobs/${worker.job.id}`} className="font-medium text-foreground underline-offset-4 hover:underline">
-              {worker.job.title}
-            </Link>
-            {worker.summary ? <> · {worker.summary}</> : null}
+            <span className="block truncate" title={`Hired for ${worker.job.title}`}>
+              Hired for{" "}
+              <Link href={`/jobs/${worker.job.id}`} className="font-medium text-foreground underline-offset-4 hover:underline">
+                {worker.job.title}
+              </Link>
+            </span>
+            {worker.summary ? (
+              <span className="mt-0.5 line-clamp-1" title={worker.summary}>
+                {worker.summary}
+              </span>
+            ) : null}
           </>
         }
         actions={
@@ -113,7 +120,7 @@ export function WorkerHeader({ worker }: { worker: WorkerHeaderView }) {
             </div>
           </div>
 
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm lg:grid-cols-4">
             <Fact icon={CalendarDays} label="Hired">
               <span title={formatDateTime(worker.hiredAt)}>{formatDate(worker.hiredAt)}</span>
               {worker.retiredAt ? <span className="block text-xs text-muted-foreground">Retired {formatDate(worker.retiredAt)}</span> : null}

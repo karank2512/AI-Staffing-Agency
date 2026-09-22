@@ -3,6 +3,8 @@ import type { MockAgentTurnInput } from "@/server/simulation/types";
 import { hashSeed, seededPick } from "../rng";
 import { formatUsdShort, joinList, plural } from "../text";
 import { computeMetrics, groupLabelHint, type GroupMetric, type Metrics, type NumericMetric } from "./analyst-metrics";
+import { fixFirst } from "./analyst-priorities";
+import { readHints } from "./hints";
 import { parseAgentInput, readStructuredInputs } from "./input";
 
 /**
@@ -27,10 +29,44 @@ function noun(spec: MockAgentTurnInput["spec"]): string {
   if (spec.jobFamily === "support_triage" || has("ticket")) return "ticket";
   if (spec.jobFamily === "feedback_analysis" || has("sentiment", "feedback")) return "feedback item";
   if (spec.jobFamily === "lead_research" || has("contact", "email")) return "lead";
+  if (spec.jobFamily === "finance_ops" || has("transaction", "invoice", "expense")) return "line item";
   if (has("plan", "price", "pricing")) return "pricing record";
   if (has("stage", "round", "investor", "amount")) return "funding round";
   if (has("company", "vendor", "competitor")) return "company";
   return "record";
+}
+
+/**
+ * Categories that are never "a quiet corner": one outage or security ticket is an incident, not an
+ * under-reported niche. Checked against the group value with separators normalised to spaces.
+ */
+const CRITICAL_GROUP_RE = /\b(outages?|incidents?|downtime|urgent|critical|security|breach(es)?|vulnerab\w*|fraud|emergency|escalations?|p0|p1|sev ?[01]|data loss)\b/;
+/** In a severity / priority split the top level is critical by definition. */
+const SEVERITY_FIELD_RE = /(severity|priority|urgency|impact)/;
+/** Most severe first: the secondary insight talks about the worst level present, not the most common bad one. */
+const SEVERE_LEVELS = [/^critical$/i, /^urgent$/i, /^high$/i, /^negative$/i];
+
+export function isCriticalGroup(field: string, value: string): boolean {
+  const text = value.toLowerCase().replace(/[_\-/]+/g, " ");
+  return CRITICAL_GROUP_RE.test(text) || (SEVERITY_FIELD_RE.test(field.toLowerCase()) && text.trim() === "high");
+}
+
+function severest(s: GroupMetric): GroupMetric["entries"][number] | undefined {
+  for (const level of SEVERE_LEVELS) {
+    const hit = s.entries.find((e) => level.test(e.key));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** "tightest SLA hours" / "highest priority" — the urgent end of a lower-is-urgent number. */
+function urgentEnd(n: NumericMetric): string {
+  return /(priority|urgency|rank)/.test(n.field.toLowerCase()) ? `highest ${n.label}` : `tightest ${n.label}`;
+}
+
+/** The groups sharing the top count ("onboarding, performance and reporting are tied at 6"). */
+function leaders(g: GroupMetric): GroupMetric["entries"] {
+  return g.entries.filter((e) => e.count === g.entries[0].count);
 }
 
 function headline(m: Metrics, things: string): string[] {
@@ -38,12 +74,23 @@ function headline(m: Metrics, things: string): string[] {
   const g = m.group;
   if (g && g.entries.length > 0) {
     const top = g.entries[0];
-    lines.push(`- **${m.total} ${things}** across **${g.entries.length} ${g.label} values**; the largest is **${top.key}** with ${top.count} (${pct(top.share)}).`);
+    const tied = leaders(g);
+    lines.push(
+      tied.length > 1
+        ? `- **${m.total} ${things}** across **${g.entries.length} ${g.label} values**; the largest are ${joinList(tied.map((e) => `**${e.key}**`))} with ${top.count} each (${pct(top.share)}).`
+        : `- **${m.total} ${things}** across **${g.entries.length} ${g.label} values**; the largest is **${top.key}** with ${top.count} (${pct(top.share)}).`,
+    );
   } else {
     lines.push(`- **${m.total} ${things}** in this run.`);
   }
   const n = m.numeric;
-  if (n) {
+  if (n?.lowerIsUrgent) {
+    const leader = n.top[0];
+    lines.push(
+      `- ${n.label[0].toUpperCase()}${n.label.slice(1)}: averaging ${num(n.mean, n.money)} per ${things.replace(/s$/, "")}, from ${num(n.min, n.money)} to ${num(n.max, n.money)}` +
+        (leader ? `; the most urgent is ${leader.name} at ${num(leader.value, n.money)}.` : "."),
+    );
+  } else if (n) {
     const leader = n.top[0];
     lines.push(
       `- Total ${n.label}: **${num(n.sum, n.money)}**, averaging ${num(n.mean, n.money)} per ${things.replace(/s$/, "")}` +
@@ -69,9 +116,10 @@ function headline(m: Metrics, things: string): string[] {
 
 function concentrationInsight(g: GroupMetric, total: number, things: string, seed: number): string {
   const [top, second] = g.entries;
+  const tied = leaders(g);
   let lead: string;
   if (!second) lead = `Every one of the ${total} ${things} sits under **${top.key}**.`;
-  else if (second.count === top.count) lead = `**${top.key}** and **${second.key}** are tied at ${top.count} of ${total} ${things} (${pct(top.share)}) each.`;
+  else if (tied.length > 1) lead = `${joinList(tied.map((e) => `**${e.key}**`))} are tied at ${top.count} of ${total} ${things} (${pct(top.share)}) each.`;
   else {
     lead = seededPick(
       [
@@ -81,7 +129,7 @@ function concentrationInsight(g: GroupMetric, total: number, things: string, see
       seed,
     );
   }
-  const rest = g.entries.slice(2);
+  const rest = g.entries.slice(Math.max(2, tied.length));
   const restCount = rest.reduce((s, e) => s + e.count, 0);
   const tail =
     rest.length > 1
@@ -92,7 +140,28 @@ function concentrationInsight(g: GroupMetric, total: number, things: string, see
   return lead + tail;
 }
 
+/**
+ * For SLA / deadline / priority-rank numbers the story is the urgent END (the smallest values), never the largest
+ * value as an "outlier": a 72-hour SLA is the least urgent ticket in the queue, not the one to look at.
+ */
+function urgentInsight(n: NumericMetric, total: number, things: string): string {
+  const leader = n.top[0];
+  const end = urgentEnd(n);
+  if (!leader) {
+    return `${n.label[0].toUpperCase()}${n.label.slice(1)} runs from ${num(n.min, n.money)} to ${num(n.max, n.money)} across ${total} ${things} (average ${num(n.mean, n.money)}); the lowest values are the most urgent.`;
+  }
+  const count = Math.max(n.atMin, 1);
+  if (count === 1) {
+    const next = n.top[1];
+    return `${leader.name} has the ${end} (${num(leader.value, n.money)}) and should be handled first${next ? `; next is ${next.name} at ${num(next.value, n.money)}` : ""}.`;
+  }
+  const shown = n.top.filter((x) => x.value === leader.value).slice(0, 3).map((x) => x.name);
+  const names = count > shown.length ? `${shown.join(", ")} and ${count - shown.length} more` : joinList(shown);
+  return `${count} of ${total} ${things} share the ${end} (${num(leader.value, n.money)}) — ${names}; these go to the front of the queue.`;
+}
+
 function numericInsight(n: NumericMetric, total: number, things: string, seed: number): string {
+  if (n.lowerIsUrgent) return urgentInsight(n, total, things);
   const leader = n.top[0];
   const topThree = n.top.slice(0, 3);
   const topShare = n.sum > 0 ? topThree.reduce((s, x) => s + x.value, 0) / n.sum : 0;
@@ -109,7 +178,7 @@ function numericInsight(n: NumericMetric, total: number, things: string, seed: n
 }
 
 function secondaryInsight(s: GroupMetric, g: GroupMetric | null, records: Array<Record<string, unknown>>, things: string): string | null {
-  const negativeLike = s.entries.find((e) => /^(negative|high|urgent|critical)$/i.test(e.key));
+  const negativeLike = severest(s);
   if (!negativeLike) return null;
   let where = "";
   if (g && records.length > 0) {
@@ -120,7 +189,8 @@ function secondaryInsight(s: GroupMetric, g: GroupMetric | null, records: Array<
       if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     const [topKey, topCount] = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
-    if (topKey && topCount) where = `, concentrated in **${topKey}** (${topCount} of them)`;
+    // "Concentrated" only when one group really holds a large share; otherwise it is merely the most common.
+    if (topKey && topCount) where = topCount / negativeLike.count >= 0.4 ? `, concentrated in **${topKey}** (${topCount} of them)` : `, most common in **${topKey}** (${topCount} of them)`;
   }
   return `${negativeLike.count} of ${records.length || "the"} ${things} are **${negativeLike.key}** ${s.label} (${pct(negativeLike.share)})${where}.`;
 }
@@ -130,12 +200,23 @@ function watchList(m: Metrics, things: string): string[] {
   const g = m.group;
   if (g && g.entries.length > 0) items.push(`**${g.entries[0].key}** — whether its ${pct(g.entries[0].share)} share of ${things} keeps growing next run.`);
   const leader = m.numeric?.top[0];
-  if (m.numeric && leader) items.push(`**${leader.name}** — the largest ${m.numeric.label} this period (${num(leader.value, m.numeric.money)}); worth a closer look.`);
-  const neg = m.secondary?.entries.find((e) => /^(negative|high|urgent|critical)$/i.test(e.key));
+  if (m.numeric && leader) {
+    items.push(
+      m.numeric.lowerIsUrgent
+        ? `**${leader.name}** — the ${urgentEnd(m.numeric)} this period (${num(leader.value, m.numeric.money)}); make sure it is picked up first.`
+        : `**${leader.name}** — the largest ${m.numeric.label} this period (${num(leader.value, m.numeric.money)}); worth a closer look.`,
+    );
+  }
+  const neg = m.secondary ? severest(m.secondary) : undefined;
   if (m.secondary && neg) items.push(`**${neg.key} ${m.secondary.label}** items (${neg.count}) — these need an owner before the next review.`);
   if (g && g.entries.length > 2) {
+    const one = things.replace(/s$/, "");
     const smallest = g.entries[g.entries.length - 1];
-    items.push(`**${smallest.key}** — only ${plural(smallest.count, things.replace(/s$/, ""))} so far; a quiet corner that may be under-reported.`);
+    items.push(
+      isCriticalGroup(g.field, smallest.key)
+        ? `**${smallest.key}** — only ${plural(smallest.count, one)}, but low volume is no comfort here; confirm each one has an owner and a resolution time.`
+        : `**${smallest.key}** — only ${plural(smallest.count, one)} so far; a quiet corner that may be under-reported.`,
+    );
   }
   if (m.quality.missing > 0 || m.quality.duplicates > 0) {
     const issues: string[] = [];
@@ -182,11 +263,18 @@ export function renderInsights(args: { input: MockAgentTurnInput; records: Array
   if (insights.length < 3 && m.group && m.group.entries.length > 2) {
     const [top, second, third] = m.group.entries;
     const one = things.replace(/s$/, "");
-    insights.push(
-      second.count < top.count
-        ? `${second.key} is the clear number two ${m.group.label} with ${plural(second.count, one)} (${pct(second.share)}), followed by ${third.key} at ${third.count}.`
-        : `${third.key} is the first ${m.group.label} behind the leaders, with ${plural(third.count, one)} (${pct(third.share)}).`,
-    );
+    const tied = leaders(m.group);
+    // Only the groups after ALL of the leaders are "behind" them; a group level with the leaders is one of them.
+    const chasers = m.group.entries.slice(tied.length);
+    const next = chasers[0];
+    const level = next ? chasers.filter((e) => e.count === next.count) : [];
+    if (second.count < top.count) {
+      insights.push(`${second.key} is the clear number two ${m.group.label} with ${plural(second.count, one)} (${pct(second.share)}), followed by ${third.key} at ${third.count}.`);
+    } else if (next && level.length === 1) {
+      insights.push(`${next.key} is the first ${m.group.label} behind the leaders, with ${plural(next.count, one)} (${pct(next.share)}).`);
+    } else if (next) {
+      insights.push(`${joinList(level.map((e) => e.key))} follow the leaders with ${plural(next.count, one)} each (${pct(next.share)}).`);
+    }
   }
   if (insights.length < 3 && m.numeric) {
     insights.push(`The spread in ${m.numeric.label} is wide: from ${num(m.numeric.min, m.numeric.money)} up to ${num(m.numeric.max, m.numeric.money)}.`);
@@ -194,6 +282,8 @@ export function renderInsights(args: { input: MockAgentTurnInput; records: Array
   if (insights.length < 3) insights.push(`Coverage this run: ${m.total} ${things} against a target of ${input.spec.deliverable.targetCount ?? "no fixed number"}.`);
 
   const lines = [intro, "", "### Headline numbers", ...headline(m, things), "", "### Insights", ...insights.slice(0, 5).map((s, i) => `${i + 1}. ${s}`)];
+  const priorities = fixFirst(records, m.group, things);
+  if (priorities.length > 0) lines.push("", ...priorities);
   const watch = watchList(m, things);
   if (watch.length > 0) lines.push("", "### What to watch", ...watch.map((w) => `- ${w}`));
   return lines.join("\n");
@@ -204,6 +294,13 @@ export function analystTurn(input: MockAgentTurnInput, now: Date): MockTextRespo
   const parsed = parseAgentInput(input.messages, input.component.inputKeys);
   const { records, stats } = readStructuredInputs(parsed);
   if ((!records || records.length === 0) && !stats) return null;
-  const metrics = computeMetrics({ records, stats, now, groupLabel: groupLabelHint(input.spec.deliverable.fields.map((f) => f.name)) });
+  const metrics = computeMetrics({
+    records,
+    stats,
+    now,
+    groupLabel: groupLabelHint(input.spec.deliverable.fields.map((f) => f.name)),
+    specFields: input.spec.deliverable.fields,
+    keyFields: readHints(input).keyFields,
+  });
   return { text: renderInsights({ input, records: records ?? [], metrics }) };
 }

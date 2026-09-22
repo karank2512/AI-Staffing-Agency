@@ -13,7 +13,9 @@ import {
   listWorkerDeliverables,
   listWorkerRuns,
 } from "@/server/queries/worker-profile";
+import { tools } from "@/server/tools";
 import { recordUsage } from "@/server/usage";
+import { hireReplacement, proposeReplacement } from "@/server/workers";
 import { createTestOrg } from "../helpers/factory";
 import { createHiredWorker } from "../helpers/fixtures";
 
@@ -108,12 +110,18 @@ async function addEvaluations(hired: Hired, runId: string, deliverableId: string
   });
 }
 
-async function createReview(hired: Hired, recommendation: "KEEP" | "IMPROVE" | "REPLACE", overallScore: number, createdAt = new Date()) {
+async function createReview(
+  hired: Hired,
+  recommendation: "KEEP" | "IMPROVE" | "REPLACE",
+  overallScore: number,
+  createdAt = new Date(),
+  workerVersionId = hired.version.id,
+) {
   return db.workerReview.create({
     data: {
       organizationId: hired.worker.organizationId,
       workerId: hired.worker.id,
-      workerVersionId: hired.version.id,
+      workerVersionId,
       periodStart: new Date(createdAt.getTime() - 30 * 86_400_000),
       periodEnd: createdAt,
       overallScore,
@@ -330,7 +338,15 @@ describe("queries/worker-profile", () => {
       expect(o.recentRuns).toHaveLength(5);
       expect(o.recentRuns[0].id).toBe(latestRun.id);
       expect(o.latestDeliverable).toMatchObject({ id: deliverable.id, runId: latestRun.id, recordCount: 10 });
-      expect(o.latestReview).toMatchObject({ id: latestReview.id, recommendation: "REPLACE", overallScore: 55, strengths: ["Cites sources", "Ranks by round size"] });
+      expect(o.latestReview).toMatchObject({
+        id: latestReview.id,
+        recommendation: "REPLACE",
+        overallScore: 55,
+        strengths: ["Cites sources", "Ranks by round size"],
+        version: 1,
+        forCurrentVersion: true,
+      });
+      expect(o.activeVersion).toEqual({ id: hired.version.id, version: 1, changeReason: "INITIAL_HIRE", activatedAt: expect.any(String) });
       expect(o.cost).toMatchObject({ estimatedPerRunUsd: 0.18, estimatedMonthlyUsd: 0.78, runsPerMonth: 4.33 });
       expect(o.cost.actualAvgPerRunUsd).toBeCloseTo((7 * 0.2 + 0.3) / 8, 4);
       await expect(getWorkerOverview(other.organization.id, hired.worker.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -340,7 +356,18 @@ describe("queries/worker-profile", () => {
       const hired = await createHiredWorker(t.organization.id);
       await db.worker.update({ where: { id: hired.worker.id }, data: { currentVersionId: null } });
       const o = await getWorkerOverview(t.organization.id, hired.worker.id);
-      expect(o).toMatchObject({ summary: null, responsibilities: [], pipeline: [], deliverable: null, tools: [], limits: null, recentRuns: [], latestDeliverable: null, latestReview: null });
+      expect(o).toMatchObject({
+        summary: null,
+        responsibilities: [],
+        pipeline: [],
+        deliverable: null,
+        tools: [],
+        limits: null,
+        recentRuns: [],
+        latestDeliverable: null,
+        latestReview: null,
+        activeVersion: null,
+      });
       expect(o.cost).toEqual({ estimatedPerRunUsd: null, estimatedMonthlyUsd: null, actualAvgPerRunUsd: null, runsPerMonth: null });
     });
   });
@@ -375,7 +402,8 @@ describe("queries/worker-profile", () => {
       for (const e of p.evaluations) expect(new Date(e.createdAt).toISOString()).toBe(e.createdAt);
 
       expect(p.reviews).toHaveLength(1);
-      expect(p.reviews[0]).toMatchObject({ id: review.id, recommendation: "KEEP", overallScore: 84, problems: [], version: 1 });
+      expect(p.reviews[0]).toMatchObject({ id: review.id, recommendation: "KEEP", overallScore: 84, problems: [], version: 1, forCurrentVersion: true });
+      expect(p.activeVersion).toMatchObject({ id: hired.version.id, version: 1, changeReason: "INITIAL_HIRE" });
       await expect(getWorkerPerformance(other.organization.id, hired.worker.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
     });
 
@@ -386,6 +414,39 @@ describe("queries/worker-profile", () => {
       expect(p.metrics.scoreTrend).toEqual([]);
       expect(p.evaluations).toEqual([]);
       expect(p.reviews).toEqual([]);
+    });
+  });
+
+  describe("reviews after a replacement", () => {
+    it("treats the replaced version's verdict as history, and a review of the new version as current again", async () => {
+      const hired = await createHiredWorker(t.organization.id, { userId: t.user.id });
+      const oldReview = await createReview(hired, "REPLACE", 53, minutesAgo(60));
+      expect((await getWorkerOverview(t.organization.id, hired.worker.id)).latestReview).toMatchObject({ id: oldReview.id, forCurrentVersion: true });
+
+      const { versionId } = await proposeReplacement(t.session, hired.worker.id);
+      // A proposal is not live yet: the v1 verdict still describes how the worker works today.
+      expect((await getWorkerOverview(t.organization.id, hired.worker.id)).latestReview?.forCurrentVersion).toBe(true);
+      await hireReplacement(t.session, versionId, { startFirstRun: false });
+
+      const o = await getWorkerOverview(t.organization.id, hired.worker.id);
+      expect(o.activeVersion).toEqual({ id: versionId, version: 2, changeReason: "REPLACEMENT", activatedAt: expect.any(String) });
+      // Still the newest review, but about v1 — the overview must not keep saying "Time to replace".
+      expect(o.latestReview).toMatchObject({ id: oldReview.id, version: 1, recommendation: "REPLACE", forCurrentVersion: false });
+
+      let p = await getWorkerPerformance(t.organization.id, hired.worker.id);
+      expect(p.currentVersion).toBe(2);
+      expect(p.activeVersion).toMatchObject({ id: versionId, version: 2, changeReason: "REPLACEMENT" });
+      expect(p.reviews.map((r) => [r.id, r.version, r.forCurrentVersion])).toEqual([[oldReview.id, 1, false]]);
+      expect((await getWorkerReview(t.organization.id, oldReview.id)).forCurrentVersion).toBe(false);
+
+      const newReview = await createReview(hired, "KEEP", 97, new Date(), versionId);
+      p = await getWorkerPerformance(t.organization.id, hired.worker.id);
+      expect(p.reviews.map((r) => [r.id, r.version, r.forCurrentVersion])).toEqual([
+        [newReview.id, 2, true],
+        [oldReview.id, 1, false],
+      ]);
+      expect((await getWorkerOverview(t.organization.id, hired.worker.id)).latestReview).toMatchObject({ id: newReview.id, forCurrentVersion: true });
+      expect((await getWorkerReview(t.organization.id, newReview.id)).forCurrentVersion).toBe(true);
     });
   });
 
@@ -408,6 +469,10 @@ describe("queries/worker-profile", () => {
       await recordUsage({ ...base, kind: "TOOL", provider: "tool", resource: "web_search", costUsd: 0.01, simulated: false });
 
       const c = await getWorkerCost(t.organization.id, hired.worker.id);
+      // Tools read by their registry name (as on /usage), keeping the id for the mono sub-label; models stay as-is.
+      expect(c.byResource.find((r) => r.kind === "TOOL")).toMatchObject({ resource: "web_search", label: tools.get("web_search")!.displayName });
+      expect(tools.get("web_search")!.displayName).not.toBe("web_search");
+      expect(c.byResource.find((r) => r.resource === "mock-standard")).toMatchObject({ kind: "MODEL", label: "mock-standard" });
 
       expect(c.days).toBe(30);
       expect(c.runs).toBe(1);
@@ -431,6 +496,13 @@ describe("queries/worker-profile", () => {
 
       expect((await getWorkerCost(t.organization.id, hired.worker.id, 7)).days).toBe(7);
       await expect(getWorkerCost(other.organization.id, hired.worker.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
+
+    it("falls back to a title-cased label for a tool the registry no longer knows", async () => {
+      const hired = await createHiredWorker(t.organization.id);
+      await recordUsage({ organizationId: t.organization.id, workerId: hired.worker.id, jobId: hired.job.id, kind: "TOOL", provider: "tool", resource: "legacy_scraper", costUsd: 0.002, simulated: false });
+      const c = await getWorkerCost(t.organization.id, hired.worker.id);
+      expect(c.byResource).toEqual([{ kind: "TOOL", resource: "legacy_scraper", label: "Legacy Scraper", calls: 1, costUsd: 0.002 }]);
     });
 
     it("reports a null simulated share when nothing was spent", async () => {

@@ -16,7 +16,7 @@ import type { JobContext } from "./job";
 
 type Row = Record<string, unknown>;
 
-const KINDS: readonly EntityKind[] = ["company", "feedback", "ticket"];
+const KINDS: readonly EntityKind[] = ["company", "feedback", "ticket", "expense"];
 
 /** Re-key a row onto the requested fields: exact key → normalized key → shared synonym → null. */
 export function remapRow(row: Row, fields: readonly string[]): Row {
@@ -104,14 +104,19 @@ function seen(rows: Row[]): Row[] {
   });
 }
 
+/** A row that answers none of the spec's required fields is not a record of this job (e.g. a feedback row remapped onto finance fields). */
+function answersBrief(row: Row, required: readonly string[]): boolean {
+  return required.length === 0 || required.some((f) => row[f] !== null && row[f] !== undefined && row[f] !== "");
+}
+
 export function genericRecords(convo: Conversation, ctx: JobContext, now: Date): Row[] {
-  const rows = seen(structuredRows(convo).map((r) => remapRow(r, ctx.fields)));
+  const rows = seen(structuredRows(convo).map((r) => remapRow(r, ctx.fields))).filter((r) => answersBrief(r, ctx.requiredFields));
   if (rows.length > 0) return rows;
 
   const pages = fetchedPages(convo);
   if (pages.length > 0) {
     const text = pages.map((p) => `${p.title}\n\n${p.text}`).join("\n\n");
-    const extracted = seen(extractRecords(text, ctx.fields, { maxRecords: Math.max(ctx.count, 8) }, now));
+    const extracted = seen(extractRecords(text, ctx.fields, { maxRecords: Math.max(ctx.count, 8) }, now)).filter((r) => answersBrief(r, ctx.requiredFields));
     if (extracted.length > 0) return extracted;
   }
 

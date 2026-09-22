@@ -40,17 +40,28 @@ export type BlockNode =
 // ── Links ───────────────────────────────────────────────────────────────────
 
 const SAFE_PROTOCOL = /^(https?:|mailto:)/i;
+/** Placeholder origin used only to check that a relative href cannot leave the site. */
+const SAME_SITE_ORIGIN = "http://same-site.invalid";
 
 /** Returns a safe href or `null` (javascript:, data:, vbscript:, protocol-relative and unknown schemes are dropped). */
 export function sanitizeHref(raw: string): string | null {
   // Browsers ignore whitespace/control characters inside the scheme ("java\nscript:"), so strip before checking.
   const href = raw.trim().replace(/[\x00-\x1f\x7f\s]+/g, "");
   if (href === "") return null;
+  // Absolute links open in a new tab without a referrer (see isExternalHref), so they may point anywhere.
   if (SAFE_PROTOCOL.test(href)) return href;
-  if (href.startsWith("//")) return null;
-  if (href.startsWith("/") || href.startsWith("#") || href.startsWith("?")) return href;
-  // Anything else with a scheme is rejected; scheme-less text like "docs/page" is treated as a relative path.
+  // Anything else with a scheme is rejected.
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
+  // What is left renders as a same-tab link WITH a referrer, so it must stay on this site. Browsers read "\" as
+  // "/" in http(s) URLs, which makes "/\evil.example" and "\\evil.example" protocol-relative just like
+  // "//evil.example"; resolving against a placeholder origin catches every such spelling.
+  if (href.includes("\\")) return null;
+  try {
+    if (new URL(href, SAME_SITE_ORIGIN).origin !== SAME_SITE_ORIGIN) return null;
+  } catch {
+    return null;
+  }
+  // "/runs/r1", "#summary", "?tab=x" and scheme-less text like "docs/page" (a relative path).
   return href;
 }
 

@@ -5,7 +5,11 @@ import { isAppError, notFound } from "@/server/errors";
 import { parseCheckpoint } from "./checkpoint";
 import { transitionRun } from "./transitions";
 
-/** Cancellation. The terminal transition itself expires approvals, denies their tool calls and skips open steps. */
+/**
+ * Cancellation. The terminal transition itself expires approvals, denies their tool calls and skips open steps.
+ * A run that never started hands its one-off instructions back, so the worker's promise ("I'll apply this on my
+ * next run") still holds after a pause or a manual cancel of a queued run.
+ */
 
 interface CancelArgs {
   runId: string;
@@ -24,6 +28,14 @@ async function cancel(args: CancelArgs): Promise<void> {
 
   await db.$transaction(async (tx) => {
     await transitionRun(run.id, "CANCELLED", { error: args.reason, finishedAt: new Date(), durationMs: Math.round(activeMs) }, { tx });
+    // Read inside the tx, after the guarded transition: a claim that raced us would have made it fail.
+    const started = await tx.run.findUnique({ where: { id: run.id }, select: { startedAt: true } });
+    if (started && started.startedAt === null) {
+      await tx.workerMessage.updateMany({
+        where: { organizationId: args.organizationId, workerId: run.workerId, appliedToRunId: run.id, classification: "TEMPORARY_INSTRUCTION" },
+        data: { instructionActive: true, appliedToRunId: null },
+      });
+    }
   });
 
   await recordActivity({

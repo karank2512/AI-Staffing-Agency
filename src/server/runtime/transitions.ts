@@ -18,11 +18,13 @@ const LABEL: Record<RunStatus, string> = {
 };
 
 export const EXPIRED_APPROVAL_NOTE = "The run ended before this request was decided";
+export const RUN_ENDED_CALL_NOTE = "The run ended before this call finished";
+export const RUN_ENDED_UNRUN_NOTE = "The run ended before this call could run";
 
 /**
  * A run that ends (or is cancelled) can leave nothing open behind it: PENDING approvals expire, their tool calls
- * are denied and RunSteps still RUNNING / WAITING / PENDING are skipped. Same rule for cancelRun and for a
- * WAITING_FOR_APPROVAL → FAILED transition, exactly as the contract asks.
+ * are denied, tool calls still RUNNING fail, approved-but-never-executed ones are denied, and RunSteps still
+ * RUNNING / WAITING / PENDING are skipped. Same rule for cancelRun, stale recovery and every terminal transition.
  */
 export async function closeOpenWork(client: DbOrTx, runId: string, now: Date): Promise<void> {
   const pending = await client.approval.findMany({ where: { runId, status: "PENDING" }, select: { id: true, toolCallId: true } });
@@ -36,6 +38,14 @@ export async function closeOpenWork(client: DbOrTx, runId: string, now: Date): P
       data: { status: "DENIED", error: EXPIRED_APPROVAL_NOTE, finishedAt: now },
     });
   }
+  // Calls a cancelled slice created but never finished (a batch is created up front and run one by one), and
+  // gated calls whose run ended between the decision and the resume. A call that is executing right now keeps
+  // its truthful outcome: the slice's own write lands after this one.
+  await client.toolCall.updateMany({ where: { runId, status: "RUNNING" }, data: { status: "FAILED", error: RUN_ENDED_CALL_NOTE, finishedAt: now } });
+  await client.toolCall.updateMany({
+    where: { runId, status: { in: ["PENDING_APPROVAL", "APPROVED"] } },
+    data: { status: "DENIED", error: RUN_ENDED_UNRUN_NOTE, finishedAt: now },
+  });
   await client.runStep.updateMany({
     where: { runId, status: { in: ["RUNNING", "WAITING", "PENDING"] } },
     data: { status: "SKIPPED", finishedAt: now },

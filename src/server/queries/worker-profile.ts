@@ -10,6 +10,7 @@ import type {
   WorkerStatus,
 } from "@prisma/client";
 import { format } from "date-fns";
+import { titleCase } from "@/lib/format";
 import { listActivity, type ActivityItem } from "@/server/activity";
 import { db } from "@/server/db";
 import {
@@ -49,10 +50,29 @@ const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() 
 async function requireWorker(organizationId: string, workerId: string) {
   const worker = await db.worker.findFirst({
     where: { id: workerId, organizationId },
-    select: { id: true, name: true, jobId: true, currentVersionId: true, currentVersion: { select: { id: true, version: true, blueprint: true } } },
+    select: {
+      id: true,
+      name: true,
+      jobId: true,
+      currentVersionId: true,
+      currentVersion: { select: { id: true, version: true, changeReason: true, activatedAt: true, blueprint: true } },
+    },
   });
   if (!worker) throw notFound("Worker");
   return worker;
+}
+
+/** The version the worker runs under today — tabs compare reviews and metrics against it. */
+export interface ActiveVersionRef {
+  id: string;
+  version: number;
+  changeReason: VersionChangeReason;
+  activatedAt: string | null;
+}
+
+function activeVersionOf(worker: Awaited<ReturnType<typeof requireWorker>>): ActiveVersionRef | null {
+  const v = worker.currentVersion;
+  return v ? { id: v.id, version: v.version, changeReason: v.changeReason, activatedAt: iso(v.activatedAt) } : null;
 }
 
 /** Records behind a deliverable, when `data` is the conventional array of flat objects. */
@@ -319,6 +339,11 @@ export interface WorkerReviewRow {
   periodEnd: string;
   createdAt: string;
   version: number;
+  /**
+   * False once the worker has moved to a newer version: the verdict describes a design that is no longer running,
+   * so pages show it as history instead of repeating its "replace" / "improve" call-to-action.
+   */
+  forCurrentVersion: boolean;
 }
 
 export interface WorkerEvaluationRow {
@@ -335,14 +360,23 @@ export interface WorkerEvaluationRow {
   simulated: boolean;
 }
 
-async function listReviews(organizationId: string, workerId: string, limit: number): Promise<WorkerReviewRow[]> {
-  const rows = await db.workerReview.findMany({
-    where: { organizationId, workerId },
-    orderBy: { createdAt: "desc" },
-    take: limit,
-    include: { workerVersion: { select: { version: true } } },
-  });
-  return rows.map((r) => ({
+interface ReviewRecord {
+  id: string;
+  workerVersionId: string;
+  overallScore: number;
+  summary: string;
+  strengths: unknown;
+  problems: unknown;
+  recommendation: ReviewRecommendation;
+  recommendationDetail: string;
+  periodStart: Date;
+  periodEnd: Date;
+  createdAt: Date;
+  workerVersion: { version: number };
+}
+
+function toReviewRow(r: ReviewRecord, currentVersionId: string | null): WorkerReviewRow {
+  return {
     id: r.id,
     overallScore: r.overallScore,
     summary: r.summary,
@@ -354,29 +388,28 @@ async function listReviews(organizationId: string, workerId: string, limit: numb
     periodEnd: r.periodEnd.toISOString(),
     createdAt: r.createdAt.toISOString(),
     version: r.workerVersion.version,
-  }));
+    forCurrentVersion: currentVersionId !== null && r.workerVersionId === currentVersionId,
+  };
+}
+
+async function listReviews(organizationId: string, workerId: string, currentVersionId: string | null, limit: number): Promise<WorkerReviewRow[]> {
+  const rows = await db.workerReview.findMany({
+    where: { organizationId, workerId },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    include: { workerVersion: { select: { version: true } } },
+  });
+  return rows.map((r) => toReviewRow(r, currentVersionId));
 }
 
 /** One review by id — used by the "Performance review" action to describe what it just generated. */
 export async function getWorkerReview(organizationId: string, reviewId: string): Promise<WorkerReviewRow> {
   const row = await db.workerReview.findFirst({
     where: { id: reviewId, organizationId },
-    include: { workerVersion: { select: { version: true } } },
+    include: { workerVersion: { select: { version: true } }, worker: { select: { currentVersionId: true } } },
   });
   if (!row) throw notFound("Performance review");
-  return {
-    id: row.id,
-    overallScore: row.overallScore,
-    summary: row.summary,
-    strengths: stringList(row.strengths),
-    problems: stringList(row.problems),
-    recommendation: row.recommendation,
-    recommendationDetail: row.recommendationDetail,
-    periodStart: row.periodStart.toISOString(),
-    periodEnd: row.periodEnd.toISOString(),
-    createdAt: row.createdAt.toISOString(),
-    version: row.workerVersion.version,
-  };
+  return toReviewRow(row, row.worker.currentVersionId);
 }
 
 // ── Overview ────────────────────────────────────────────────────────────────
@@ -408,7 +441,9 @@ export interface WorkerOverviewView {
   metrics: Pick<ReviewMetrics, "windowDays" | "runs" | "succeeded" | "failed" | "deliverables" | "accepted" | "rejected" | "totalCostUsd" | "avgCostPerRunUsd">;
   recentRuns: WorkerRunRow[];
   latestDeliverable: WorkerDeliverableRow | null;
+  /** Newest review across all versions — check `forCurrentVersion` before treating its verdict as current. */
   latestReview: WorkerReviewRow | null;
+  activeVersion: ActiveVersionRef | null;
   cost: { estimatedPerRunUsd: number | null; estimatedMonthlyUsd: number | null; actualAvgPerRunUsd: number | null; runsPerMonth: number | null };
 }
 
@@ -453,7 +488,7 @@ export async function getWorkerOverview(organizationId: string, workerId: string
     getWorkerMetrics(organizationId, worker.id),
     listWorkerRuns(organizationId, worker.id, { limit: RECENT_RUNS }),
     listWorkerDeliverables(organizationId, worker.id, { limit: 1 }),
-    listReviews(organizationId, worker.id, 1),
+    listReviews(organizationId, worker.id, worker.currentVersionId, 1),
   ]);
 
   return {
@@ -479,6 +514,7 @@ export async function getWorkerOverview(organizationId: string, workerId: string
     recentRuns,
     latestDeliverable: latestDeliverable[0] ?? null,
     latestReview: reviews[0] ?? null,
+    activeVersion: activeVersionOf(worker),
     cost: {
       estimatedPerRunUsd: blueprint?.costEstimate.perRunUsd ?? null,
       estimatedMonthlyUsd: blueprint?.costEstimate.monthlyUsd ?? null,
@@ -494,8 +530,10 @@ export interface WorkerPerformanceView {
   score: WorkerScore;
   metrics: ReviewMetrics;
   evaluations: WorkerEvaluationRow[];
+  /** Newest first, across versions; rows for earlier versions have `forCurrentVersion: false`. */
   reviews: WorkerReviewRow[];
   currentVersion: number | null;
+  activeVersion: ActiveVersionRef | null;
   /** Evaluation weights the current blueprint asks for (before re-normalization over sources with data). */
   weights: { deterministic: number; judge: number; user: number } | null;
 }
@@ -528,7 +566,7 @@ export async function getWorkerPerformance(organizationId: string, workerId: str
         deliverable: { select: { title: true } },
       },
     }),
-    listReviews(organizationId, worker.id, REVIEWS_LIMIT),
+    listReviews(organizationId, worker.id, worker.currentVersionId, REVIEWS_LIMIT),
   ]);
 
   return {
@@ -548,13 +586,25 @@ export async function getWorkerPerformance(organizationId: string, workerId: str
     })),
     reviews,
     currentVersion: worker.currentVersion?.version ?? null,
+    activeVersion: activeVersionOf(worker),
     weights: parsed?.success ? parsed.data.evaluation.weights : null,
   };
 }
 
 // ── Cost ────────────────────────────────────────────────────────────────────
 
-export interface WorkerCostView extends WorkerCostSummary {
+export interface WorkerCostResourceRow {
+  /** Human name: the tool's registry displayName ("Notifications"), or the model id for models. */
+  label: string;
+  /** Raw ledger resource — tool registry name ("send_notification") or model id ("mock-standard"). */
+  resource: string;
+  kind: "MODEL" | "TOOL";
+  calls: number;
+  costUsd: number;
+}
+
+export interface WorkerCostView extends Omit<WorkerCostSummary, "byResource"> {
+  byResource: WorkerCostResourceRow[];
   /** Blueprint's planned monthly spend for the current version. */
   estimatedMonthlyUsd: number | null;
   modelCostUsd: number;
@@ -588,6 +638,12 @@ export async function getWorkerCost(organizationId: string, workerId: string, da
 
   return {
     ...summary,
+    // The usage module labels rows with the raw ledger resource; tools read better by their registry name (as on /usage).
+    byResource: summary.byResource.map((r) => ({
+      ...r,
+      resource: r.label,
+      label: r.kind === "TOOL" ? (tools.get(r.label)?.displayName ?? titleCase(r.label)) : r.label,
+    })),
     estimatedMonthlyUsd: parsed?.success ? parsed.data.costEstimate.monthlyUsd : null,
     modelCostUsd: Math.round(modelCostUsd * 1e6) / 1e6,
     toolCostUsd: Math.round(toolCostUsd * 1e6) / 1e6,

@@ -27,3 +27,23 @@ export function specFor(family: JobFamily, overrides: Partial<JobSpec> = {}, ans
   });
   return JobSpecSchema.parse({ ...spec, ...overrides, deliverable: { ...spec.deliverable, ...(overrides.deliverable ?? {}) } });
 }
+
+/** Descriptions customers actually typed (browser sessions, the Describe step's example chips and the demo seed). */
+export const KAI =
+  "Every weekday morning, research 15 Series A fintech companies in Europe that are hiring engineers. Give me a CSV with company, website, funding stage, headcount and a one-line reason each is a good fit for our developer tools.";
+export const PRICING_MONITOR =
+  "Every week, check the pricing pages of our five main competitors (Notion, Coda, Airtable, ClickUp, Monday). Capture plan name, monthly price, seat minimum and any change since last week, and flag anything that moved.";
+export const FUNDING_TRACKER =
+  "Track newly funded AI infrastructure startups every week. For each round capture the company, stage, amount, lead investor and a source link, rank the biggest rounds and write a short market research report on what changed.";
+export const FEEDBACK_DIGEST =
+  "Weekly customer feedback analysis with a Monday email to the product team. Every week, categorize all the customer feedback and NPS survey responses we received by theme and sentiment, tell us what to fix first, and email the summary to the product team on Monday morning.";
+export const FINTECH_LEADS =
+  "Build a weekly lead list of Series A fintech companies as a CSV. Each week, find 25 accounts with a likely decision-maker, why they fit our ICP, and a source for each, delivered as a CSV we can import into our CRM.";
+export const SEED_PRICING_JOB =
+  "Weekly competitor pricing check. Every Monday, analyze the pricing pages of our five closest competitors and tell me what changed — new plans, price moves, free-tier changes — with a clear recommendation for our own pricing.";
+
+/** Scope any description exactly as the simulated scoper would (family, title, questions), with optional answers. */
+export function scoped(description: string, answers: Record<string, string> = {}): JobSpec {
+  const questions = mockScopingQuestions(description);
+  return mockJobSpec({ description, title: questions.draftTitle, jobFamily: questions.jobFamily, intake: { questions: questions.questions, answers } });
+}

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { RunStatus } from "@prisma/client";
 import Link from "next/link";
 import { ArrowUpRight, CalendarClock, FileText, History, Wallet, type LucideIcon } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
@@ -8,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
 import { WorkerAvatar } from "@/components/worker-avatar";
 import { formatUsd, pluralize } from "@/lib/format";
-import { statusLabel } from "@/lib/status";
+import { getStatusMeta, statusLabel, TONE_CLASSES } from "@/lib/status";
+import { cn } from "@/lib/utils";
 import type { WorkerCardView } from "@/server/queries/workforce";
 import { RunNowButton } from "./run-now-button";
 
@@ -19,15 +21,30 @@ function runNowBlocker(worker: WorkerCardView): string | undefined {
   return undefined;
 }
 
-function Fact({ icon: Icon, label, children }: { icon: LucideIcon; label: string; children: ReactNode }) {
+/**
+ * One cell of the facts grid. At three cards per row (1280px) a cell is only ~120px wide, so the value wraps instead of
+ * truncating, and secondary context ("Completed", "1 to review") goes on its own smaller line.
+ */
+function Fact({ icon: Icon, label, detail, children }: { icon: LucideIcon; label: string; detail?: ReactNode; children: ReactNode }) {
   return (
     <div className="min-w-0">
       <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
         <Icon className="size-3" aria-hidden="true" />
         {label}
       </p>
-      <p className="truncate text-sm text-foreground tabular-nums">{children}</p>
+      <p className="text-sm text-pretty break-words text-foreground tabular-nums">{children}</p>
+      {detail ? <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">{detail}</p> : null}
     </div>
+  );
+}
+
+function RunStatusDetail({ status }: { status: RunStatus }) {
+  const meta = getStatusMeta("run", status);
+  return (
+    <>
+      <span className={cn("size-1.5 shrink-0 rounded-full", TONE_CLASSES[meta.tone].dot)} aria-hidden="true" />
+      {meta.label}
+    </>
   );
 }
 
@@ -72,11 +89,10 @@ export function WorkerCard({ worker }: { worker: WorkerCardView }) {
 
       <CardContent>
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg border bg-muted/40 p-3">
-          <Fact icon={History} label="Last run">
+          <Fact icon={History} label="Last run" detail={worker.lastRun ? <RunStatusDetail status={worker.lastRun.status} /> : undefined}>
             {worker.lastRun ? (
               <Link href={`/runs/${worker.lastRun.id}`} className="hover:underline">
                 <RelativeTime iso={worker.lastRun.at} />
-                <span className="text-muted-foreground"> · {statusLabel("run", worker.lastRun.status)}</span>
               </Link>
             ) : worker.activeRun ? (
               <span className="text-muted-foreground">First run in progress</span>
@@ -101,16 +117,19 @@ export function WorkerCard({ worker }: { worker: WorkerCardView }) {
           <Fact icon={Wallet} label="Cost this month">
             {formatUsd(worker.costThisMonthUsd)}
           </Fact>
-          <Fact icon={FileText} label="Deliverables">
+          <Fact
+            icon={FileText}
+            label="Deliverables"
+            detail={
+              worker.deliverablesAwaitingReview > 0 ? (
+                <span className="text-amber-700">{worker.deliverablesAwaitingReview} to review</span>
+              ) : undefined
+            }
+          >
             {worker.deliverables === 0 ? (
               <span className="text-muted-foreground">None yet</span>
             ) : (
-              <>
-                {pluralize(worker.deliverables, "deliverable")}
-                {worker.deliverablesAwaitingReview > 0 ? (
-                  <span className="text-amber-700"> · {worker.deliverablesAwaitingReview} to review</span>
-                ) : null}
-              </>
+              pluralize(worker.deliverables, "deliverable")
             )}
           </Fact>
         </div>

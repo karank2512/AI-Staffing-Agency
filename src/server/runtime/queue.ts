@@ -7,7 +7,9 @@ import { refreshWorkerScore } from "@/server/evaluation";
 import { conflict, notFound } from "@/server/errors";
 import { llm } from "@/server/models";
 import { parseCheckpoint } from "./checkpoint";
+import { WORKER_RETIRED_REASON } from "./failure";
 import { log } from "./log";
+import { sweepOrphanedRuns } from "./orphans";
 import { closeOpenWork } from "./transitions";
 import { RunInputSchema, type EnqueueRunArgs } from "./types";
 
@@ -54,10 +56,9 @@ export async function enqueueRun(args: EnqueueRunArgs): Promise<{ runId: string 
       orderBy: { createdAt: "asc" },
       select: { id: true, content: true },
     });
-    const input = RunInputSchema.parse({
-      ...args.input,
-      instructions: [...(args.input?.instructions ?? []), ...pendingInstructions.map((m) => m.content.trim())].filter((s) => s.length > 0),
-    });
+    // De-duplicated: a retry of a cancelled run carries its instructions AND gets them back from the messages.
+    const instructions = [...(args.input?.instructions ?? []), ...pendingInstructions.map((m) => m.content.trim())].filter((s) => s.length > 0);
+    const input = RunInputSchema.parse({ ...args.input, instructions: [...new Set(instructions)] });
 
     const run = await tx.run.create({
       data: {
@@ -199,13 +200,18 @@ export async function recoverStaleRuns(opts: { organizationId?: string } = {}): 
       maxAttempts: true,
       heartbeatAt: true,
       checkpoint: true,
-      worker: { select: { name: true } },
+      worker: { select: { name: true, status: true } },
     },
   });
 
   let recovered = 0;
   for (const run of stale) {
     const guard = { id: run.id, status: "RUNNING" as const, heartbeatAt: run.heartbeatAt };
+    if (run.worker.status === "RETIRED") {
+      // Re-queueing would strand it: a retired worker's run is never claimed again.
+      if (await cancelStale(run, guard, now)) recovered += 1;
+      continue;
+    }
     if (run.attempt < run.maxAttempts) {
       const result = await db.run.updateMany({
         where: guard,
@@ -243,7 +249,31 @@ export async function recoverStaleRuns(opts: { organizationId?: string } = {}): 
       actorType: "SYSTEM",
     });
   }
-  return recovered;
+  return recovered + (await sweepOrphanedRuns(opts));
+}
+
+type StaleRun = { id: string; organizationId: string; workerId: string; jobId: string; checkpoint: unknown; worker: { name: string } };
+
+async function cancelStale(run: StaleRun, guard: { id: string; status: "RUNNING"; heartbeatAt: Date | null }, now: Date): Promise<boolean> {
+  const activeMs = parseCheckpoint(run.checkpoint)?.counters.activeMs ?? 0;
+  const result = await db.run.updateMany({
+    where: guard,
+    data: { status: "CANCELLED", error: WORKER_RETIRED_REASON, finishedAt: now, durationMs: Math.round(activeMs), lockedBy: null, lockedAt: null, heartbeatAt: null },
+  });
+  if (result.count === 0) return false;
+  await closeOpenWork(db, run.id, now);
+  log.warn(`stale run ${run.id} cancelled: its worker was retired`);
+  await recordActivity({
+    organizationId: run.organizationId,
+    type: "RUN_CANCELLED",
+    title: `${run.worker.name}’s run was cancelled`,
+    detail: WORKER_RETIRED_REASON,
+    workerId: run.workerId,
+    jobId: run.jobId,
+    runId: run.id,
+    actorType: "SYSTEM",
+  });
+  return true;
 }
 
 /** A fresh Run (trigger RETRY) for a FAILED or CANCELLED one, carrying the original input. */

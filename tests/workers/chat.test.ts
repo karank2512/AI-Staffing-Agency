@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { db } from "@/server/db";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { db, toJson } from "@/server/db";
+import { llm } from "@/server/models";
 import { getVersionComparison, listMessages, sendMessageToWorker } from "@/server/workers";
 import { classifyMessageHeuristically, normalizeInstruction } from "@/server/workers/chat-mock";
 import { deriveSpecChange, parseCadence, parseFormat, parseRecordTarget } from "@/server/workers/chat-spec-change";
@@ -32,6 +33,17 @@ describe("mock classifier", () => {
     ["Focus on vector databases", "TEMPORARY_INSTRUCTION"],
     ["Include the source URL for each round", "TEMPORARY_INSTRUCTION"],
     ["thanks!", "QUESTION"],
+    // Polite requests are requests, even with a question mark.
+    ["Can you also include the CEO's LinkedIn?", "SPEC_CHANGE"],
+    ["Could you please also add the lead investor?", "SPEC_CHANGE"],
+    ["Would you add headcount from now on?", "SPEC_CHANGE"],
+    ["Can you focus on fintech for the next run?", "TEMPORARY_INSTRUCTION"],
+    ["Could you skip seed rounds?", "TEMPORARY_INSTRUCTION"],
+    ["Can you include the CEO's LinkedIn this time?", "TEMPORARY_INSTRUCTION"],
+    ["Please add a column for headcount", "TEMPORARY_INSTRUCTION"],
+    ["Can you explain how you rank the rounds?", "QUESTION"],
+    ["Could you tell me what you found?", "QUESTION"],
+    ["Why did you pick these sources?", "QUESTION"],
   ])("%s → %s", (message, expected) => {
     expect(classifyMessageHeuristically(message)).toBe(expected);
   });
@@ -40,6 +52,7 @@ describe("mock classifier", () => {
     expect(normalizeInstruction("From now on, can you please include the lead investor?")).toBe("Include the lead investor");
     expect(normalizeInstruction("this time, focus on Series A rounds only.")).toBe("Focus on Series A rounds only");
     expect(normalizeInstruction("Please run daily at 8am going forward")).toBe("Run daily at 8am");
+    expect(normalizeInstruction("Can you also include the CEO's LinkedIn?")).toBe("Include the CEO's LinkedIn");
   });
 });
 
@@ -70,7 +83,7 @@ describe("spec-change derivation", () => {
     const collector = next.components.find((c) => c.id === "collector");
     expect(collector?.type === "agent" && collector.outputSchemaHint).toContain("about 20 records per run");
     expect(next.costEstimate.runsPerMonth).toBe(30);
-    expect(changes.join(" ")).toContain("daily at 8am");
+    expect(changes.join(" ")).toContain("schedule weekly on Monday at 9am → daily at 8am");
     expect(changes.join(" ")).toContain("20 records");
   });
 
@@ -131,7 +144,8 @@ describe("sendMessageToWorker", () => {
     expect(reply.role).toBe("WORKER");
     expect(reply.content).toContain("I'll apply this on my next run");
     expect(reply.content).toContain("Focus on Series A rounds only");
-    expect(reply.content).toContain("weekly on monday at 9am");
+    expect(reply.content).toContain("My next run is weekly on Monday at 9am");
+    expect(reply.metadata).toMatchObject({ simulated: true });
 
     const events = await activityOf(t.organization.id, hired.worker.id, "INSTRUCTION_RECEIVED");
     expect(events).toHaveLength(1);
@@ -201,6 +215,63 @@ describe("sendMessageToWorker", () => {
 
     expect((await listMessages(t.organization.id, hired.worker.id, 4)).map((m) => m.role)).toEqual(["USER", "WORKER", "USER", "WORKER"]);
     expect((await db.workerMessage.count({ where: { workerId: hired.worker.id, instructionActive: true } }))).toBe(0);
+  });
+
+  it("answers 'why these sources?' from what the last run actually did", async () => {
+    const run = await createRun(hired, { status: "SUCCEEDED", createdAt: daysAgo(1) });
+    await createDeliverable(hired, run.id, { title: "Weekly AI Infra Funding Report — Sep 21", data: records(9) });
+    const calls = [
+      { toolName: "web_search", input: { query: "AI infrastructure funding announcements" } },
+      { toolName: "web_search", input: { query: "vector database series a" } },
+      { toolName: "fetch_url", input: { url: "https://news.example/funding/nearsidedb" } },
+      { toolName: "fetch_url", input: { url: "https://www.directory.example/companies/tinygrid" } },
+      { toolName: "extract_data", input: { text: "…", fields: ["company"] } },
+      { toolName: "fetch_url", input: { url: "https://news.example/funding/broken" }, status: "FAILED" as const },
+    ];
+    for (const c of calls) {
+      await db.toolCall.create({ data: { runId: run.id, workerId: hired.worker.id, toolName: c.toolName, input: toJson(c.input), status: c.status ?? "SUCCEEDED", simulated: true } });
+    }
+    await db.runStep.createMany({
+      data: [
+        { runId: run.id, index: 0, kind: "DETERMINISTIC", status: "SUCCEEDED", componentId: "validate_records", title: "Validate records", output: toJson({ before: 10, after: 9, dropped: 1 }) },
+        { runId: run.id, index: 1, kind: "DETERMINISTIC", status: "SUCCEEDED", componentId: "dedupe", title: "Remove duplicates", output: toJson({ before: 9, after: 9, removed: 0 }) },
+        { runId: run.id, index: 2, kind: "DELIVERABLE", status: "SUCCEEDED", title: "Delivered", output: toJson({ records: 9 }) },
+      ],
+    });
+
+    const result = await sendMessageToWorker(t.session, hired.worker.id, "Why did you pick these sources?");
+    expect(result.classification).toBe("QUESTION");
+    const reply = await db.workerMessage.findUniqueOrThrow({ where: { id: result.replyMessageId } });
+    expect(reply.content).toMatch(/open the most relevant results myself/);
+    expect(reply.content).toContain("searched the web twice (“AI infrastructure funding announcements” and “vector database series a”)");
+    expect(reply.content).toContain("read 2 pages on news.example and directory.example");
+    expect(reply.content).toContain("kept 9 of 10 records after validation and de-duplication");
+    // Not the status boilerplate every other question used to get.
+    expect(reply.content).not.toMatch(/scheduled|current score/);
+  });
+
+  it("turns a polite 'can you also include…?' into a proposed change, not a status reply", async () => {
+    const result = await sendMessageToWorker(t.session, hired.worker.id, "Can you also include the CEO's LinkedIn?");
+    expect(result.classification).toBe("SPEC_CHANGE");
+    expect(result.proposedVersionId).toBeDefined();
+    const version = await db.workerVersion.findUniqueOrThrow({ where: { id: result.proposedVersionId! } });
+    expect(version.changeSummary).toBe("Include the CEO's LinkedIn");
+    const reply = await db.workerMessage.findUniqueOrThrow({ where: { id: result.replyMessageId } });
+    expect(reply.content).toContain("for your approval");
+  });
+
+  it("badges templated replies Simulated only when the classification ran on the mock provider", async () => {
+    const real = llm.generateObject.bind(llm);
+    const spy = vi.spyOn(llm, "generateObject").mockImplementation(async (req, tracking) => ({ ...(await real(req, tracking)), simulated: false }) as never);
+    try {
+      const instruction = await sendMessageToWorker(t.session, hired.worker.id, "This time, focus on Series A rounds only.");
+      const change = await sendMessageToWorker(t.session, hired.worker.id, "From now on, run daily at 8am.");
+      for (const id of [instruction.replyMessageId, change.replyMessageId]) {
+        expect((await db.workerMessage.findUniqueOrThrow({ where: { id } })).metadata).toMatchObject({ simulated: false });
+      }
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("rejects empty messages, unknown workers and retired workers", async () => {

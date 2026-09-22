@@ -23,6 +23,7 @@ import { degradeForTier } from "./quality";
 const SEARCH_RESULTS = 8;
 const FETCH_TOP = 4;
 const MAX_EXTRACT_CHARS = 24_000;
+const MAX_NAMED_ROWS = 60;
 
 const DATASET_LABELS: Record<SampleDataset, string> = {
   customer_feedback: "customer feedback",
@@ -43,8 +44,8 @@ export function collectorTurn(input: MockAgentTurnInput, now: Date): MockTextRes
 
 function nextToolStep(convo: Conversation, ctx: JobContext): MockTextResponse | null {
   // A generic job with web access prefers the web; every other job with a dataset grant starts there.
-  const preferDataset = convo.has("read_dataset") && (ctx.kind !== "generic" || !convo.has("web_search"));
-  if (preferDataset) {
+  const preferDataset = ctx.dataset !== null && convo.has("read_dataset") && (ctx.kind !== "generic" || !convo.has("web_search"));
+  if (preferDataset && ctx.dataset) {
     if (convo.canTry("read_dataset")) {
       return toolTurn(convo, `I'll start with the ${DATASET_LABELS[ctx.dataset]} dataset.`, [{ name: "read_dataset", input: { dataset: ctx.dataset } }]);
     }
@@ -58,7 +59,7 @@ function nextToolStep(convo: Conversation, ctx: JobContext): MockTextResponse | 
   }
 
   if (convo.canTry("fetch_url")) {
-    const urls = urlsToRead(convo);
+    const urls = urlsToRead(convo, ctx.namedVendors.length > 0);
     const turn = toolTurn(
       convo,
       `Opening the ${urls.length === 1 ? "most relevant source" : `${urls.length} most relevant sources`}.`,
@@ -79,9 +80,13 @@ function nextToolStep(convo: Conversation, ctx: JobContext): MockTextResponse | 
   return null;
 }
 
-/** Round-robin across the search queries so a second, focused query contributes at least one source. */
-function urlsToRead(convo: Conversation): string[] {
+/**
+ * Round-robin across the search queries so a second, focused query contributes at least one source — except when
+ * the first query is the customer's own vendor list: those pricing pages are read first.
+ */
+function urlsToRead(convo: Conversation, namedFirst: boolean): string[] {
   const perQuery = convo.succeeded("web_search").map((ex) => resultsOf(ex.output).map((r) => r.url));
+  if (namedFirst && perQuery.length > 0) return [...new Set(perQuery.flat())].slice(0, FETCH_TOP);
   const picked: string[] = [];
   const longest = Math.max(0, ...perQuery.map((list) => list.length));
   for (let i = 0; i < longest && picked.length < FETCH_TOP; i++) {
@@ -117,8 +122,14 @@ function finalAnswer(ctx: JobContext, convo: Conversation, now: Date): MockTextR
 
 function collectRecords(ctx: JobContext, convo: Conversation, now: Date): Array<Record<string, unknown>> {
   if (ctx.kind === "generic") return genericRecords(convo, ctx, now).slice(0, ctx.count);
-  const index = new EntityIndex(now);
+  const index = new EntityIndex(now, { vendorNames: ctx.namedVendors });
   const found = gatherCandidates(convo, ctx.kind, index);
   const pool = found.length > 0 ? found : fallbackPool(ctx, ctx.kind, index);
-  return entityRecords(prioritize(pool, ctx, ctx.kind, index), ctx, ctx.kind, index).slice(0, ctx.count);
+  const refs = prioritize(pool, ctx, ctx.kind, index);
+  const records = entityRecords(refs, ctx, ctx.kind, index);
+  // Every vendor the customer named makes the cut (all of its plans), unless the run asked for a count or the
+  // quality model is trimming a vague worker's output.
+  const namedKeys = new Set(index.namedRefs().map((r) => r.key));
+  const namedRows = ctx.directives.count || ctx.vague ? 0 : entityRecords(refs.filter((r) => namedKeys.has(r.key)), ctx, ctx.kind, index).length;
+  return records.slice(0, Math.max(ctx.count, Math.min(namedRows, MAX_NAMED_ROWS)));
 }

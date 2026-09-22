@@ -1,4 +1,5 @@
 import type { ReportSection } from "@/server/domain/blueprint";
+import { formatColumnCell, isMoneyColumn } from "./cells";
 import type { Stats } from "./compute-stats";
 import { asRecords, formatCell, formatNumber, humanizeHeader, isRecord, resolveColumns, type DataRecord } from "./records";
 import type { OpResult } from "./result";
@@ -32,7 +33,7 @@ export function renderTable(records: DataRecord[], columns?: string[], maxRows =
   const lines = [
     `| ${cols.map(humanizeHeader).join(" | ")} |`,
     `| ${cols.map(() => "---").join(" | ")} |`,
-    ...shown.map((record) => `| ${cols.map((c) => formatCell(record[c])).join(" | ")} |`),
+    ...shown.map((record) => `| ${cols.map((c) => formatColumnCell(record[c], c)).join(" | ")} |`),
   ];
   if (records.length > shown.length) lines.push("", `_Showing ${shown.length} of ${records.length} records._`);
   return lines;
@@ -51,7 +52,7 @@ function renderBullets(value: unknown): string[] {
     return value.map((item) => {
       if (isRecord(item)) {
         const cols = resolveColumns([item], undefined, 4);
-        const [first, ...rest] = cols.map((c) => formatCell(item[c])).filter(Boolean);
+        const [first, ...rest] = cols.map((c) => formatColumnCell(item[c], c)).filter(Boolean);
         return `- **${first ?? ""}**${rest.length > 0 ? ` — ${rest.join(" · ")}` : ""}`;
       }
       return `- ${formatCell(item)}`;
@@ -78,7 +79,9 @@ function renderStats(value: unknown): string[] {
     lines.push("", "| Field | Count | Sum | Mean | Min | Max |", "| --- | --- | --- | --- | --- | --- |");
     for (const [field, summary] of numeric) {
       if (!isRecord(summary)) continue;
-      lines.push(`| ${humanizeHeader(field)} | ${formatCell(summary.count)} | ${formatCell(summary.sum)} | ${formatCell(summary.mean)} | ${formatCell(summary.min)} | ${formatCell(summary.max)} |`);
+      // Sum / mean / min / max of a money field are dollars too; the count never is.
+      const cell = (v: unknown) => (isMoneyColumn(field) ? formatColumnCell(v, field) : formatCell(v));
+      lines.push(`| ${humanizeHeader(field)} | ${formatCell(summary.count)} | ${cell(summary.sum)} | ${cell(summary.mean)} | ${cell(summary.min)} | ${cell(summary.max)} |`);
     }
   }
   return lines.length > 0 ? lines : ["_No statistics available._"];

@@ -12,15 +12,18 @@ import { closeJobAction, discardJobAction } from "../../actions";
 export interface JobActionsProps {
   jobId: string;
   title: string;
+  /** Decides how "discard" reads: a DRAFT job loses a draft spec, a SPEC_APPROVED one loses an approved spec. */
+  status: JobDetailView["job"]["status"];
   can: JobDetailView["can"];
   /** The worker holding the seat, for the "View worker" shortcut. */
   currentWorker: { id: string; name: string } | null;
 }
 
 /** Header controls for a job. The ONE primary button is "Hire" (when the seat is open); everything else is outline. */
-export function JobActions({ jobId, title, can, currentWorker }: JobActionsProps) {
+export function JobActions({ jobId, title, status, can, currentWorker }: JobActionsProps) {
   const router = useRouter();
   const hireHref = `/hire?jobId=${encodeURIComponent(jobId)}`;
+  const isDraft = status === "DRAFT";
 
   return (
     <>
@@ -28,17 +31,17 @@ export function JobActions({ jobId, title, can, currentWorker }: JobActionsProps
         <ConfirmDialog
           trigger={
             <Button variant="destructive">
-              <Trash2 aria-hidden="true" /> Discard draft
+              <Trash2 aria-hidden="true" /> {isDraft ? "Discard draft" : "Discard job"}
             </Button>
           }
           title={`Discard “${title}”?`}
-          description="The job and its draft spec are deleted. Nothing has been hired, so there is no history to keep."
+          description={`The job and its ${isDraft ? "draft" : "approved"} spec are deleted. Nothing has been hired, so there is no history to keep.`}
           confirmLabel="Discard job"
           destructive
           onConfirm={async () => {
             const r = await discardJobAction(jobId);
             if (!r.ok) throw new Error(r.error);
-            toast.success("Draft discarded");
+            toast.success(isDraft ? "Draft discarded" : "Job discarded");
             router.push(r.data.redirectTo);
           }}
         />

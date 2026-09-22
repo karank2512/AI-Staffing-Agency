@@ -23,10 +23,17 @@ export interface NumericMetric {
   field: string;
   label: string;
   money: boolean;
+  /**
+   * True for SLA / deadline / time-left / priority-rank style numbers, where the SMALLEST value needs attention
+   * first. `top` is then ordered ascending (most urgent first) and a sum is meaningless.
+   */
+  lowerIsUrgent: boolean;
   sum: number;
   mean: number;
   max: number;
   min: number;
+  /** How many records sit exactly at `min` (0 when only stats were given). */
+  atMin: number;
   top: Array<{ name: string; value: number }>;
 }
 
@@ -39,6 +46,10 @@ export interface Metrics {
   secondary: GroupMetric | null;
   numeric: NumericMetric | null;
   recency: { field: string; label: string; last14: number; last30: number } | null;
+  /**
+   * `missing` counts records lacking a REQUIRED spec field (any blank field when the records do not follow the
+   * spec); `duplicates` uses the blueprint's keyFields when known, else an identifier heuristic.
+   */
   quality: { missing: number; duplicates: number };
 }
 
@@ -53,6 +64,10 @@ const ID_FIELDS = ["id", "ticket_id", "feedback_id", "record_id", "company", "co
 const MONEY_RE = /(usd|amount|price|revenue|valuation|cost|budget|spend|arr|mrr|raised|funding|deal)/;
 const NUMERIC_RE = /(score|employees|headcount|count|size|total|value|number|rating|nps|hours)/;
 const DATE_RE = /(date|_on$|_at$|announced|received|created|published|opened|updated)/;
+/** A smaller number is more urgent: SLAs, deadlines, time left, priority ranks where 1 = most urgent … */
+const LOWER_IS_URGENT_RE = /(^|_)(sla|due|deadline|priority|urgency|rank)(_|$)|_(hours|days)$|^(hours|days)_(to|until|left|remaining)/;
+/** … unless it counts time already spent (older / more overdue is the urgent end) or is a score/amount. */
+const NOT_LOWER_IS_URGENT_RE = /(overdue|late|age|aged|open|since|elapsed|ago|worked|spent|billable|logged|waiting|score|rating|value|saved)/;
 const MAX_GROUP_VALUES = 15;
 const TOP_ITEMS = 5;
 const DAY_MS = 86_400_000;
@@ -70,6 +85,11 @@ const LABELS: Record<string, string> = {
   starting_price_usd: "starting price",
   sla_hours: "SLA hours",
 };
+
+export function isLowerUrgent(field: string): boolean {
+  const key = normalizeKey(field);
+  return LOWER_IS_URGENT_RE.test(key) && !NOT_LOWER_IS_URGENT_RE.test(key) && !MONEY_RE.test(key);
+}
 
 export function labelFor(field: string): string {
   const key = normalizeKey(field);
@@ -146,17 +166,20 @@ function pickNumeric(records: readonly InputRecord[], nameField: string | null):
     .filter((x): x is { name: string; value: number } => x.value !== null);
   const values = rows.map((x) => x.value);
   const sum = values.reduce((a, b) => a + b, 0);
+  const lowerIsUrgent = isLowerUrgent(field);
   return {
     field,
     label: labelFor(field),
     money: MONEY_RE.test(normalizeKey(field)),
+    lowerIsUrgent,
     sum,
     mean: values.length > 0 ? sum / values.length : 0,
     max: Math.max(...values),
     min: Math.min(...values),
+    atMin: values.filter((v) => v === Math.min(...values)).length,
     top: rows
       .slice()
-      .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name))
+      .sort((a, b) => (lowerIsUrgent ? a.value - b.value : b.value - a.value) || a.name.localeCompare(b.name))
       .slice(0, TOP_ITEMS)
       .filter((x) => x.name.length > 0),
   };
@@ -207,17 +230,73 @@ function fromStats(stats: StatsInput, groupLabel: string): Pick<Metrics, "group"
           field,
           label: labelFor(field),
           money: MONEY_RE.test(normalizeKey(field)),
+          lowerIsUrgent: isLowerUrgent(field),
           sum: summary.sum ?? summary.total ?? 0,
           mean: summary.mean ?? summary.avg ?? summary.average ?? 0,
           max: summary.max ?? 0,
           min: summary.min ?? 0,
+          atMin: 0,
           top: [],
         }
       : null;
   return { total, group, numeric };
 }
 
-export function computeMetrics(args: { records?: InputRecord[]; stats?: StatsInput; now: Date; groupLabel?: string }): Metrics {
+/** Record keys for the given field names (spec / blueprint spelling → the records' own spelling). */
+function resolve(records: readonly InputRecord[], names: readonly string[]): string[] {
+  const key = keyOf(records);
+  return names.map((n) => key(normalizeKey(n)) ?? n);
+}
+
+/**
+ * Records missing a REQUIRED spec field. Optional fields left blank are not a data-quality problem. Falls back to
+ * "any blank field" when the spec lists no fields or the records do not follow it (none of its fields appear).
+ */
+function countMissing(records: readonly InputRecord[], spec: ReadonlyArray<{ name: string; required: boolean }> | undefined): number {
+  const key = keyOf(records);
+  const followsSpec = (spec ?? []).some((f) => key(normalizeKey(f.name)) !== undefined);
+  if (!spec || !followsSpec) return records.filter((r) => Object.values(r).some(isBlank)).length;
+  const required = resolve(
+    records,
+    spec.filter((f) => f.required).map((f) => f.name),
+  );
+  return records.filter((r) => required.some((k) => isBlank(r[k]))).length;
+}
+
+const partOf = (v: unknown) => (isBlank(v) ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v)).toLowerCase().replace(/\s+/g, " ").trim());
+
+/**
+ * Duplicates the way the blueprint's dedupe step defines them — ALL keyFields together, case/whitespace-insensitive,
+ * a record whose key is entirely blank never counting — so "vendor + plan" workers do not flag every second plan.
+ * Without keyFields (or when none of them appear in the records) an identifier heuristic stands in.
+ */
+function countDuplicates(records: readonly InputRecord[], keyFields: readonly string[] | undefined, fallbackField: string | null): number {
+  const key = keyOf(records);
+  const known = keyFields && keyFields.some((f) => key(normalizeKey(f)) !== undefined);
+  const fields = known ? resolve(records, keyFields) : fallbackField ? [fallbackField] : [];
+  if (fields.length === 0) return 0;
+  const seen = new Set<string>();
+  let duplicates = 0;
+  for (const r of records) {
+    const parts = fields.map((f) => partOf(r[f]));
+    if (parts.every((p) => p === "")) continue;
+    const id = parts.join("\u241f");
+    if (seen.has(id)) duplicates++;
+    else seen.add(id);
+  }
+  return duplicates;
+}
+
+export function computeMetrics(args: {
+  records?: InputRecord[];
+  stats?: StatsInput;
+  now: Date;
+  groupLabel?: string;
+  /** The spec's fields — their `required` flags decide what counts as a missing field. */
+  specFields?: ReadonlyArray<{ name: string; required: boolean }>;
+  /** The blueprint's dedupe keyFields, when the caller knows them. */
+  keyFields?: readonly string[];
+}): Metrics {
   const records = args.records ?? [];
   const groupLabel = args.groupLabel ?? "group";
   if (records.length === 0) {
@@ -231,14 +310,6 @@ export function computeMetrics(args: { records?: InputRecord[]; stats?: StatsInp
   const secondaryIsListed = secondary !== null && SECONDARY_GROUPS.includes(normalizeKey(secondary.field));
 
   const idField = ID_FIELDS.map((n) => key(n)).find((k): k is string => k !== undefined) ?? nameField;
-  const seen = new Set<string>();
-  let duplicates = 0;
-  for (const r of records) {
-    const id = idField ? String(r[idField] ?? "").trim().toLowerCase() : "";
-    if (id.length === 0) continue;
-    if (seen.has(id)) duplicates++;
-    else seen.add(id);
-  }
   return {
     total: records.length,
     nameField,
@@ -246,6 +317,6 @@ export function computeMetrics(args: { records?: InputRecord[]; stats?: StatsInp
     secondary: secondaryIsListed ? secondary : null,
     numeric: pickNumeric(records, nameField),
     recency: pickRecency(records, args.now),
-    quality: { missing: records.filter((r) => Object.values(r).some(isBlank)).length, duplicates },
+    quality: { missing: countMissing(records, args.specFields), duplicates: countDuplicates(records, args.keyFields, idField) },
   };
 }

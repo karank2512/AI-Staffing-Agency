@@ -7,7 +7,7 @@ import { normalizeKey } from "./text";
  * `null` (a real extractor can't invent a field either).
  */
 
-export type EntityKind = "company" | "feedback" | "ticket";
+export type EntityKind = "company" | "feedback" | "ticket" | "expense";
 
 type SynonymTable = Record<string, readonly string[]>;
 
@@ -35,7 +35,18 @@ const COMPANY: SynonymTable = {
   linkedin_url: ["linkedin", "linkedin_url", "contact_linkedin", "profile_url"],
   fit_score: ["fit_score", "score", "icp_score", "lead_score", "priority_score", "relevance_score"],
   pricing_model: ["pricing_model", "pricing", "pricing_type", "billing_model", "price_model"],
-  starting_price_usd: ["starting_price_usd", "starting_price", "price_usd", "price", "entry_price", "entry_price_usd", "monthly_price_usd", "lowest_price_usd"],
+  starting_price_usd: ["starting_price_usd", "starting_price", "price_usd", "price", "entry_price", "entry_price_usd", "lowest_price_usd"],
+  // A MONTHLY figure only: usage-based prices (per GPU-hour, per 1M tokens …) leave it null — see pricing-facts.ts.
+  monthly_price_usd: [
+    "monthly_price_usd", "monthly_price", "price_per_month", "price_per_month_usd", "monthly_fee", "monthly_fee_usd", "monthly_cost",
+    "monthly_cost_usd", "monthly_list_price", "monthly_list_price_usd", "list_price_monthly_usd", "per_month_usd",
+  ],
+  seat_minimum: ["seat_minimum", "minimum_seats", "min_seats", "seat_min", "seats_minimum", "minimum_seat_count", "min_seat_count"],
+  change_since_last: [
+    "change_since_last", "change", "changes", "what_changed", "change_since_last_week", "change_since_last_run", "changes_since_last",
+    "price_change", "pricing_change", "delta",
+  ],
+  open_roles: ["open_roles", "open_positions", "job_openings", "openings", "open_jobs", "job_postings", "hiring_roles", "open_role_count", "number_of_open_roles", "roles_open"],
   free_tier: ["free_tier", "has_free_tier", "free_plan"],
   plans: ["plans", "plan_names", "tiers"],
   pricing_url: ["pricing_url", "pricing_page"],
@@ -78,6 +89,29 @@ const TICKET: SynonymTable = {
   sla_hours: ["sla_hours", "sla", "response_sla_hours"],
 };
 
+/** Spend ledger lines (finance ops): subscriptions, invoices and card charges. */
+const EXPENSE: SynonymTable = {
+  id: ["id", "transaction_id", "txn_id", "transaction", "line_id", "reference", "ref", "charge_id", "record_id"],
+  invoice_number: ["invoice_id", "invoice_number", "invoice_no", "invoice"],
+  date: ["date", "transaction_date", "posted_on", "posted_at", "charged_on", "billed_on", "invoice_date", "paid_on", "created_on", "charge_date"],
+  vendor: ["vendor", "vendor_name", "supplier", "merchant", "payee", "company", "tool", "tool_name", "app", "application", "service", "provider", "name", "software"],
+  product: ["product", "description", "item", "line_item", "plan", "service_description", "what"],
+  category: ["category", "spend_category", "expense_category", "type", "gl_account", "account", "subcategory", "spend_type"],
+  amount_usd: ["amount_usd", "amount", "total", "total_usd", "cost", "cost_usd", "monthly_cost", "monthly_cost_usd", "spend", "spend_usd", "price", "charge", "value", "monthly_spend"],
+  billing_cycle: ["billing_cycle", "billing_period", "frequency", "billing_frequency", "cadence", "term"],
+  owner: ["owner", "budget_owner", "requester", "employee", "cardholder", "purchaser", "requested_by", "contact", "owner_name"],
+  team: ["team", "department", "cost_center", "business_unit", "owner_team"],
+  seats: ["seats", "licenses", "licences", "seat_count", "purchased_seats", "total_seats"],
+  active_seats: ["active_seats", "active_users", "seats_used", "used_seats", "users"],
+  seat_utilization: ["utilization", "seat_utilization", "usage", "usage_rate", "utilization_pct"],
+  renewal_date: ["renewal_date", "renews_on", "renewal", "next_renewal", "contract_end", "renewal_on", "renews"],
+  payment_method: ["payment_method", "method", "card", "paid_with", "payment_type"],
+  status: ["status", "state", "payment_status"],
+  flag_reason: ["flag_reason", "flag", "flags", "exception", "exception_reason", "issue", "anomaly", "reason", "flagged_reason", "red_flag", "finding"],
+  notes: ["notes", "note", "comment", "comments", "memo", "recommendation", "action", "next_step", "suggested_action", "recommended_action"],
+  source_url: ["source_url", "url", "source", "link", "evidence_url"],
+};
+
 function invert(table: SynonymTable): Map<string, string> {
   const out = new Map<string, string>();
   for (const [canonical, names] of Object.entries(table)) {
@@ -90,10 +124,15 @@ const LOOKUP: Record<EntityKind, Map<string, string>> = {
   company: invert(COMPANY),
   feedback: invert(FEEDBACK),
   ticket: invert(TICKET),
+  expense: invert(EXPENSE),
 };
 
 /** Prefixes spec authors add for clarity ("company_hq", "lead_email") that carry no extra meaning. */
-const NOISE_PREFIX = /^(company|startup|customer|ticket|feedback|lead|record|item|round|funding)_/;
+const NOISE_PREFIX = /^(company|startup|customer|ticket|feedback|lead|record|item|round|funding|expense|transaction|invoice|subscription)_/;
+
+/** "monthly_subscription_price", "cost_per_month_usd" … — any monthly money column is the monthly price. */
+const MONTHLY_MONEY = /(^|_)(month|monthly|mo)(_|$)/;
+const MONEY_WORD = /(^|_)(price|cost|fee|fees|rate|pricing)(_|$)/;
 
 export function canonicalField(kind: EntityKind, field: string): string | null {
   const key = normalizeKey(field);
@@ -101,7 +140,9 @@ export function canonicalField(kind: EntityKind, field: string): string | null {
   const direct = table.get(key);
   if (direct) return direct;
   const stripped = key.replace(NOISE_PREFIX, "");
-  return stripped !== key ? (table.get(stripped) ?? null) : null;
+  const viaPrefix = stripped !== key ? (table.get(stripped) ?? null) : null;
+  if (viaPrefix) return viaPrefix;
+  return kind === "company" && MONTHLY_MONEY.test(key) && MONEY_WORD.test(key) ? "monthly_price_usd" : null;
 }
 
 export function resolveField(kind: EntityKind, facts: Record<string, unknown>, field: string): unknown {
@@ -111,10 +152,18 @@ export function resolveField(kind: EntityKind, facts: Record<string, unknown>, f
   return value === undefined ? null : value;
 }
 
-/** One flat record with EXACTLY the requested keys, in the requested order. */
+/**
+ * One flat record with EXACTLY the requested keys, in the requested order. When a monthly-price column stays
+ * empty because the vendor bills per GPU-hour / per token / by contract, the notes column (if requested) says so.
+ */
 export function buildRecord(kind: EntityKind, facts: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
   const record: Record<string, unknown> = {};
   for (const f of fields) record[f] = resolveField(kind, facts, f);
+  if (kind === "company" && typeof facts.monthly_price_note === "string") {
+    const monthly = fields.find((f) => canonicalField(kind, f) === "monthly_price_usd");
+    const notes = fields.find((f) => canonicalField(kind, f) === "notes");
+    if (monthly && notes && record[monthly] === null) record[notes] = facts.monthly_price_note;
+  }
   return record;
 }
 

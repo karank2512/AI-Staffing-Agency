@@ -69,6 +69,8 @@ export function supportTriageTemplate(ctx: TemplateContext): BlueprintDraft {
   const id = ctx.pick("id", "ticket_id", "ref", "ticket");
   const groupBy = ctx.pick("team", "category", "priority", "queue");
   const rankBy = ctx.pick("priority_score", "sla_hours", "score") || ctx.numeric();
+  // Time-to-deadline fields rank the other way round: the ticket with the least time left is the most urgent.
+  const lowerIsUrgent = /(?:sla|hours|minutes|days|deadline|due|time_to)/i.test(rankBy);
   const keyFields = id ? [id] : [];
 
   const collector = agentDraft({
@@ -108,7 +110,7 @@ export function supportTriageTemplate(ctx: TemplateContext): BlueprintDraft {
     steps: { validate: true, dedupe: keyFields.length > 0, rank: rankBy !== "", computeStats: groupBy !== "" && spec.deliverable.format === "markdown", notify: ctx.notify },
     keyFields,
     rankBy,
-    rankDirection: "desc",
+    rankDirection: lowerIsUrgent ? "asc" : "desc",
     groupBy,
     toolReasons: [
       reason("read_dataset", "Read the tickets that arrived in your helpdesk (sample datasets in this phase)."),

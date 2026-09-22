@@ -114,3 +114,32 @@ export const plural = (n: number, word: string, pluralWord = `${word}s`): string
 export function versionLabel(status: string): string {
   return status.toLowerCase().replace(/_/g, " ");
 }
+
+/** "Weekly on Monday at 9am" inside a sentence: lower-case the first letter only, never the day name. */
+export const lowerFirst = (text: string): string => (text.length > 0 ? `${text.charAt(0).toLowerCase()}${text.slice(1)}` : text);
+
+/**
+ * A KPI value in its display unit — rates as percentages, money as dollars, durations as minutes/seconds, counts
+ * as counts — so evidence reads "33% vs target 85%", never "0.3333 vs target 0.85".
+ */
+export function formatKpiValue(value: number | null | undefined, unit: string): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "n/a";
+  switch (unit) {
+    case "%":
+      return `${Math.round(value * 100)}%`;
+    case "$":
+      return `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
+    case "sec":
+    case "s": {
+      const seconds = Math.round(value);
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const rest = seconds % 60;
+      return rest === 0 ? `${minutes}m` : `${minutes}m ${String(rest).padStart(2, "0")}s`;
+    }
+    default: {
+      const rounded = Math.round(value * 10) / 10;
+      return unit && unit !== "records" ? `${rounded} ${unit}` : `${rounded}`;
+    }
+  }
+}

@@ -1,5 +1,6 @@
-import { JobFamilySchema, detectJobFamily } from "@/server/domain";
+import { JobFamilySchema } from "@/server/domain";
 import { notFound } from "@/server/errors";
+import { detectFamily } from "./family-cues";
 import { getJob, latestOpenSpec, parseIntake, parseProposal, parseStoredSpec } from "./jobs";
 import type { HireFlowState, HireStep } from "./types";
 
@@ -12,7 +13,7 @@ export async function getHireFlowState(organizationId: string, jobId: string): P
   if (job.status !== "DRAFT" && job.status !== "SPEC_APPROVED") throw notFound("Hire flow");
 
   const family = JobFamilySchema.safeParse(job.jobFamily);
-  const jobFamily = family.success ? family.data : detectJobFamily(job.description);
+  const jobFamily = family.success ? family.data : detectFamily(job.description);
   const latest = await latestOpenSpec(job.id);
   const step: HireStep = !latest ? "questions" : latest.status === "APPROVED" ? "proposal" : "spec";
 

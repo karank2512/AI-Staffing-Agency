@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { WorkerBlueprintSchema, parseBlueprint, type AgentComponent, type BlueprintDraft, type DeliverableFormatSlug, type WorkerBlueprint } from "@/server/domain";
 import { isAppError } from "@/server/errors";
-import { designBlueprint, draftFromTemplate } from "@/server/staffing";
+import { designBlueprint, draftFromTemplate, reportTableColumns } from "@/server/staffing";
+import { NOTABLE_KEY } from "@/server/staffing/notable-feedback";
 import { tools } from "@/server/tools";
-import { FAMILIES, specFor } from "./helpers";
+import { FAMILIES, KAI, PRICING_MONITOR, scoped, specFor } from "./helpers";
 
 const FORMATS: readonly DeliverableFormatSlug[] = ["markdown", "csv", "json"];
 
@@ -39,8 +40,16 @@ describe("staffing: designBlueprint over every family template", () => {
         const order = ["validate_records", "dedupe", "rank", "compute_stats"];
         const present = ids(bp).filter((id) => order.includes(id));
         expect(present).toEqual(order.filter((id) => present.includes(id)));
+        // Only a feedback report builds a side shortlist; every other pipeline leaves the table on `records`.
+        const shortlisted = family === "feedback_analysis" && format === "markdown";
+        expect(ids(bp).filter((id) => id.startsWith("notable_"))).toEqual(shortlisted ? ["notable_shortlist", "notable_rank"] : []);
         for (const c of bp.components) {
           if (c.type !== "deterministic") continue;
+          if (c.id.startsWith("notable_")) {
+            expect(c.outputKey).toBe(NOTABLE_KEY);
+            expect(fieldNames.has(c.operation === "filter" ? c.config.field : c.operation === "rank" ? c.config.by : "")).toBe(true);
+            continue;
+          }
           if (c.operation === "validate_records") {
             expect(c.outputKey).toBe("records");
             expect(c.config.requiredFields).toEqual(spec.deliverable.fields.filter((f) => f.required).map((f) => f.name));
@@ -75,7 +84,7 @@ describe("staffing: designBlueprint over every family template", () => {
             expect(report.config.title).toBe(spec.deliverable.title);
             const sources = report.config.sections.map((s) => s.sourceKey);
             expect(sources).toContain("insights");
-            expect(sources).toContain("records");
+            expect(sources).toContain(shortlisted ? NOTABLE_KEY : "records");
             expect(sources.includes("stats")).toBe(hasStats);
             // Every heading the customer named is rendered by code or handed to the analyst.
             const rendered = new Set(report.config.sections.map((s) => s.heading));
@@ -215,6 +224,50 @@ describe("staffing: designBlueprint wiring rules", () => {
     const a = designBlueprint(spec, draftFromTemplate(spec));
     const b = designBlueprint(spec, draftFromTemplate(spec));
     expect(a).toEqual(b);
+  });
+});
+
+describe("staffing: report tables and ranking read the way the customer needs", () => {
+  const tableOf = (bp: WorkerBlueprint) => {
+    const report = bp.components.find((c) => c.type === "deterministic" && c.operation === "compile_report");
+    if (report?.type !== "deterministic" || report.operation !== "compile_report") throw new Error("no report");
+    return report.config.sections.find((sec) => sec.as === "table")!;
+  };
+
+  it("keeps required fields and the source link when the table has to drop columns", () => {
+    const spec = specFor("market_research"); // 8 fields + rank > 8 columns
+    const table = tableOf(designBlueprint(spec, draftFromTemplate(spec)));
+    expect(table.columns).toEqual(["rank", "company", "category", "stage", "amount_usd", "announced_on", "lead_investor", "source_url"]);
+    expect(table.columns).not.toContain("hq");
+
+    const many = [...Array.from({ length: 9 }, (_, i) => ({ name: `detail_${i}`, required: false })), { name: "company", required: true }, { name: "source_url", required: false }];
+    expect(reportTableColumns(many, true)).toEqual(["rank", "detail_0", "detail_1", "detail_2", "detail_3", "detail_4", "company", "source_url"]);
+    expect(reportTableColumns([], true)).toBeUndefined();
+  });
+
+  it("ranks triage by time left, most urgent first", () => {
+    const spec = specFor("support_triage", { deliverable: { ...specFor("support_triage").deliverable, format: "markdown", sections: ["Summary", "Volume by team", "Urgent tickets"] } });
+    const bp = designBlueprint(spec, draftFromTemplate(spec));
+    const rank = bp.components.find((c) => c.id === "rank");
+    expect(rank?.type === "deterministic" && rank.operation === "rank" ? rank.config : null).toMatchObject({ by: "sla_hours", direction: "asc" });
+    expect(rank?.description).toMatch(/^Lowest sla hours first/);
+  });
+
+  it("does not rank a lead list by an arbitrary number, and keys plan-level pricing rows on competitor + plan", () => {
+    const leads = scoped(KAI); // company, website, funding_stage, headcount, fit_reason, source_url
+    const leadBp = designBlueprint(leads, draftFromTemplate(leads));
+    expect(ids(leadBp)).not.toContain("rank");
+    expect(ids(leadBp)).toEqual(["collector", "validate_records", "dedupe", "to_csv"]);
+    const csv = leadBp.components.find((c) => c.id === "to_csv");
+    expect(csv?.type === "deterministic" && csv.operation === "to_csv" ? csv.config.columns : null).toEqual(["company", "website", "funding_stage", "headcount", "fit_reason", "source_url"]);
+
+    const pricing = scoped(PRICING_MONITOR);
+    const bp = designBlueprint(pricing, draftFromTemplate(pricing));
+    const dedupe = bp.components.find((c) => c.id === "dedupe");
+    expect(dedupe?.type === "deterministic" && dedupe.operation === "dedupe" ? dedupe.config.keyFields : null).toEqual(["competitor", "plan_name"]);
+    const rank = bp.components.find((c) => c.id === "rank");
+    expect(rank?.type === "deterministic" && rank.operation === "rank" ? rank.config : null).toMatchObject({ by: "monthly_price_usd", direction: "asc" });
+    expect(ids(bp)).toContain("compute_stats"); // by pricing model, for the "Pricing model breakdown" section
   });
 });
 

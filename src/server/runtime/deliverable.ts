@@ -3,17 +3,15 @@ import { recordActivity } from "@/server/activity";
 import { db, toJson } from "@/server/db";
 import { toDbDeliverableFormat } from "@/server/domain";
 import type { BlueprintDeliverable } from "@/server/domain/blueprint";
-import { oneLine } from "./compact";
 import { asRecords, isRecord } from "./deterministic/records";
 import type { RunSlice } from "./slice";
+import { deliverableSummary } from "./summary";
 
 /**
  * The Deliverable row is created at the FIRST component boundary where the blueprint's contentKey (and dataKey,
  * when set) exist in the context — later components (e.g. the approval-gated notifier) run after it. Creation is
  * idempotent: the checkpoint remembers the id, and a crash in between is covered by the "existing row" check.
  */
-
-const SUMMARY_CHARS = 280;
 
 export function renderTitle(template: string, args: { jobTitle: string; now: Date }): string {
   return template
@@ -22,33 +20,8 @@ export function renderTitle(template: string, args: { jobTitle: string; now: Dat
     .trim();
 }
 
-/** Lines outside fenced code blocks (the fences and everything between them are dropped). */
-function proseLines(content: string): string[] {
-  const kept: string[] = [];
-  let fenced = false;
-  for (const line of content.split("\n")) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      fenced = !fenced;
-      continue;
-    }
-    if (!fenced) kept.push(line);
-  }
-  return kept;
-}
-
-/** Plain-text opening of a markdown document: no headings, tables, code, list markers or emphasis. */
-export function narrativeSummary(content: string, max = SUMMARY_CHARS): string {
-  const text = proseLines(content)
-    .filter((line) => !/^\s*(#|\||---|\*\*\*)/.test(line))
-    .map((line) => line.replace(/^[\s>*+-]+|^\s*\d+[.)]\s+/g, "").trim())
-    .filter(Boolean)
-    .join(" ")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/[*_`]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
-}
+// Kept here for existing importers (the seed quotes markdown openings the same way the runtime does).
+export { deliverableSummary, narrativeSummary } from "./summary";
 
 function renderContent(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -77,8 +50,7 @@ export async function ensureDeliverable(slice: RunSlice): Promise<void> {
   const records = Array.isArray(dataValue) && dataValue.every(isRecord) ? asRecords(dataValue) : null;
   const content = renderContent(contentValue);
   const title = renderTitle(deliverable.titleTemplate, { jobTitle: spec.title, now });
-  const narrative = typeof contentValue === "string" ? narrativeSummary(contentValue) : "";
-  const summary = narrative || (records ? `${records.length} record${records.length === 1 ? "" : "s"}` : oneLine(content, SUMMARY_CHARS));
+  const summary = deliverableSummary({ blueprint, spec, contentValue, content, records });
 
   const created = await db.deliverable.create({
     data: {

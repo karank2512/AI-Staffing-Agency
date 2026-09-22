@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { transport } from "@/server/tools/guarded-http";
 import { fetchUrlLive, fetchUrlTool, htmlToText, MAX_BODY_BYTES, MAX_TEXT_CHARS } from "@/server/tools/impl/fetch-url";
 import { TAVILY_ENDPOINT, webSearchTool } from "@/server/tools/impl/web-search";
 import type { LookupFn } from "@/server/tools/net-guard";
@@ -15,6 +16,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -210,7 +212,7 @@ Foo Ventures.</p><div><p>Second paragraph.</p></div>
   });
 
   it("the tool goes live for non-.example hosts when the context is live", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => page("<title>Live</title><p>hello</p>")));
+    vi.spyOn(transport, "fetch").mockImplementation(async () => page("<title>Live</title><p>hello</p>"));
     // DNS is real here, so use an IP literal that is public to avoid resolution.
     const result = await fetchUrlTool.execute({ url: "http://93.184.216.34/" }, makeCtx({ simulated: false }));
     expect(result).toEqual({ output: { url: "http://93.184.216.34/", title: "Live", text: "hello" }, simulated: false });

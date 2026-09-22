@@ -187,9 +187,45 @@ function scoreCriterion(
   return { score, reasoning: ordered.slice(0, 3).map((a) => a.observation).join(" ") };
 }
 
+/** How much of a criterion's score survives records that break the brief: all at 100% fit, 35% at none. */
+const FIT_FLOOR = 0.35;
+const PRESENTATION = /clarity|clear|structur|format|readab|organi|presentation|concise|style|tone|layout/;
+
+function fitObservation(fit: NonNullable<DeliverableSignals["constraintFit"]>): string {
+  const brief = fit.labels.length > 0 ? ` (${fit.labels.join(", ")})` : "";
+  const example = fit.examples.length > 0 ? `; e.g. ${fit.examples.join(", ")}` : "";
+  return fit.fitting === 0
+    ? `None of the ${fit.checked} records match the brief${brief}${example}.`
+    : `Only ${fit.fitting} of ${fit.checked} records match the brief${brief}${example}.`;
+}
+
+/**
+ * Records that break the brief's hard constraints ("Series A fintech in Europe") make the work wrong however
+ * polished it is, so every criterion except pure presentation is scaled down by the share that fits.
+ */
+function applyConstraintFit(
+  rubric: readonly RubricCriterion[],
+  criteria: Array<{ id: string; score: number; reasoning: string }>,
+  fit: DeliverableSignals["constraintFit"],
+): { criteria: Array<{ id: string; score: number; reasoning: string }>; issue: string | null } {
+  if (!fit || fit.checked === 0 || fit.fitting >= fit.checked) return { criteria, issue: null };
+  const rate = fit.fitting / fit.checked;
+  const factor = FIT_FLOOR + (1 - FIT_FLOOR) * rate;
+  const observation = fitObservation(fit);
+  return {
+    issue: observation,
+    criteria: criteria.map((c, i) => {
+      const criterion = rubric[i];
+      if (PRESENTATION.test(`${criterion.id} ${criterion.criterion}`.toLowerCase())) return c;
+      return { ...c, score: Math.round(Math.max(0.05, c.score * factor) * 100) / 100, reasoning: `${observation} ${c.reasoning}`.trim() };
+    }),
+  };
+}
+
 export function mockJudgeOutput(rubric: readonly RubricCriterion[], signals: DeliverableSignals, seed: string): JudgeOutput {
   const assessments = assessSignals(signals);
-  const criteria = rubric.map((criterion) => ({ id: criterion.id, ...scoreCriterion(criterion, assessments, seed) }));
+  const scored = rubric.map((criterion) => ({ id: criterion.id, ...scoreCriterion(criterion, assessments, seed) }));
+  const { criteria, issue } = applyConstraintFit(rubric, scored, signals.constraintFit);
 
   const totalWeight = rubric.reduce((sum, c) => sum + c.weight, 0);
   const overall = criteria.reduce((sum, c, i) => sum + c.score * rubric[i].weight, 0) / totalWeight;
@@ -212,7 +248,7 @@ export function mockJudgeOutput(rubric: readonly RubricCriterion[], signals: Del
   const weakest = (Object.values(assessments) as Assessment[])
     .filter((a): a is { value: number; observation: string } => a.value !== null)
     .sort((a, b) => a.value - b.value)[0];
-  const focus = weakest && weakest.value < 0.8 ? ` Main issue: ${weakest.observation}` : "";
+  const focus = issue ? ` Main issue: ${issue}` : weakest && weakest.value < 0.8 ? ` Main issue: ${weakest.observation}` : "";
 
   return { criteria, overallReasoning: `${verdict}${spread}${focus}` };
 }

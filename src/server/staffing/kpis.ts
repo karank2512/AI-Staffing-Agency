@@ -9,14 +9,19 @@ import {
   type Kpi,
   type RubricCriterion,
 } from "@/server/domain";
-import { clipText, toSnakeCase } from "./cues";
+import { toSnakeCase } from "./cues";
 
 /**
  * KPIs and the evaluation plan are derived from the approved JobSpec alone, so two workers hired for the same
  * job are always measured the same way (which is what makes "Replace" comparable). PURE.
  */
 
-const DEFAULT_MAX_COST_PER_RUN_USD = 1;
+/** One per-run cost ceiling for the KPI, the deterministic check and the hard limit, so they never disagree. */
+const DEFAULT_MAX_COST_PER_RUN_USD = DEFAULT_RUN_LIMITS.maxCostPerRunUsd;
+
+export function maxCostPerRun(spec: JobSpec): number {
+  return spec.budget.maxCostPerRunUsd ?? DEFAULT_MAX_COST_PER_RUN_USD;
+}
 
 export function requiredFieldNames(spec: JobSpec): string[] {
   return spec.deliverable.fields.filter((f) => f.required).map((f) => f.name);
@@ -69,7 +74,7 @@ export function deriveKpis(spec: JobSpec): Kpi[] {
       name: "Cost per run",
       description: "Model and tool spend per run.",
       metric: "cost_per_run_usd",
-      target: spec.budget.maxCostPerRunUsd ?? DEFAULT_MAX_COST_PER_RUN_USD,
+      target: maxCostPerRun(spec),
       unit: "$",
       direction: "lower_is_better",
     },
@@ -94,18 +99,66 @@ function uniqueId(base: string, taken: Set<string>): string {
   return id;
 }
 
+/** Success-criterion metrics measured from the run record (acceptance, cost…) rather than read off the deliverable. */
+const PROCESS_METRIC = /\b(?:acceptance|quality score|success rate|cost|duration|latency|runtime)\b/i;
+/** Criteria about volume fold into the coverage dimension. */
+const VOLUME_METRIC = /\brecords? per run\b|\bvolume\b|\bcount\b/i;
+
+const AUDIENCE_BY_FAMILY: Record<JobSpec["jobFamily"], string> = {
+  lead_research: "the sales team",
+  market_research: "the people deciding on it",
+  market_analysis: "the people deciding on it",
+  feedback_analysis: "the product team",
+  support_triage: "the support leads",
+  finance_ops: "the finance lead",
+  content: "the target audience",
+  general: "the team",
+};
+
+/** An outcome sentence as a short criterion name: word-boundary cut, no ellipsis. */
+function criterionLabel(description: string): string {
+  const clean = description.replace(/\s+/g, " ").trim().replace(/[.!]+$/, "");
+  if (clean.length <= 60) return clean;
+  let cut = clean.slice(0, 60);
+  cut = cut.slice(0, cut.lastIndexOf(" ") > 20 ? cut.lastIndexOf(" ") : 60);
+  return cut.replace(/\s+(?:and|or|of|for|the|a|an|in|on|to|with|from|by)$/i, "").trim();
+}
+
+function audienceOf(spec: JobSpec): string {
+  const stated = spec.constraints.find((c) => /^audience(?: and tone)?:/i.test(c));
+  if (stated) return stated.replace(/^audience(?: and tone)?:\s*/i, "").split(/[,;]/)[0].trim().toLowerCase();
+  return AUDIENCE_BY_FAMILY[spec.jobFamily];
+}
+
+/**
+ * The reviewer's rubric: qualities a reader can judge from the deliverable itself — coverage of the brief,
+ * accuracy and sourcing, specificity, usefulness — plus the spec's own success criteria phrased as outcomes.
+ * KPI names ("Acceptance rate", "Records per run") never become criteria: those are measured, not judged.
+ */
 function rubricFromSpec(spec: JobSpec): RubricCriterion[] {
   const taken = new Set<string>();
-  const rubric: RubricCriterion[] = spec.successCriteria.map((c) => {
-    const label = c.metric?.trim() || clipText(c.description, 60);
-    const target = c.target ? ` Target: ${c.target}.` : "";
-    return {
-      id: uniqueId(c.id, taken),
-      criterion: label,
-      description: `${c.description.trim().replace(/\.?$/, ".")}${target}`,
+  const target = spec.deliverable.targetCount;
+  const volume = spec.successCriteria.filter((c) => VOLUME_METRIC.test(c.metric ?? ""));
+  const qualities = spec.successCriteria.filter((c) => !volume.includes(c));
+  const sentence = (text: string) => text.trim().replace(/\.?$/, ".");
+
+  const rubric: RubricCriterion[] = [
+    {
+      id: uniqueId(volume[0]?.id ?? "coverage", taken),
+      criterion: "Coverage of the brief",
+      description: [
+        `Covers what the brief asks for${target ? ` (about ${target} records per run)` : ""}, with nothing important missing and nothing off-topic.`,
+        ...volume.map((c) => sentence(c.description)),
+      ].join(" "),
       weight: 1,
-    };
-  });
+    },
+  ];
+  for (const c of qualities) {
+    // A target the reviewer can check on the page ("100% of records") stays; a KPI threshold ("≥ 85%") does not.
+    const observable = c.target && !PROCESS_METRIC.test(c.metric ?? "");
+    rubric.push({ id: uniqueId(c.id, taken), criterion: criterionLabel(c.description), description: `${sentence(c.description)}${observable ? ` Target: ${c.target}.` : ""}`, weight: 1 });
+  }
+  const audience = audienceOf(spec);
   rubric.push(
     {
       id: uniqueId("accuracy_sourcing", taken),
@@ -113,15 +166,30 @@ function rubricFromSpec(spec: JobSpec): RubricCriterion[] {
       description: "Facts are correct, specific and traceable to a source; nothing is invented or padded.",
       weight: 2,
     },
+    spec.deliverable.format === "markdown"
+      ? {
+          id: uniqueId("specificity", taken),
+          criterion: "Specificity of insights",
+          description: "Each point names the companies, items and figures behind it; no generic commentary or filler.",
+          weight: 1,
+        }
+      : {
+          id: uniqueId("specificity", taken),
+          criterion: "Specificity of each record",
+          description: "Every value is concrete — real names, figures and reasons — never a placeholder or boilerplate.",
+          weight: 1,
+        },
     {
       id: uniqueId("usefulness", taken),
-      criterion: "Usefulness",
-      description: `Someone could act on this ${spec.deliverable.title} as delivered, without re-doing the work.`,
+      criterion: criterionLabel(`Usefulness for ${audience}`),
+      description: `${cap(audience)} could act on this ${spec.deliverable.title} as delivered, without re-doing the work.`,
       weight: 1,
     },
   );
   return rubric;
 }
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export function deriveEvaluationPlan(spec: JobSpec, draft: Pick<BlueprintDraft, "keyFields">): EvaluationPlan {
   const checks: DeterministicCheck[] = [];
@@ -167,7 +235,7 @@ export function deriveEvaluationPlan(spec: JobSpec, draft: Pick<BlueprintDraft, 
       weight: 1,
     });
   }
-  const maxCost = spec.budget.maxCostPerRunUsd ?? DEFAULT_RUN_LIMITS.maxCostPerRunUsd;
+  const maxCost = maxCostPerRun(spec);
   checks.push({
     id: "max_cost_usd",
     type: "max_cost_usd",

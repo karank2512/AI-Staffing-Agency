@@ -28,6 +28,19 @@ export class RunFailure extends Error {
   }
 }
 
+/**
+ * The run can no longer go anywhere useful and must end as CANCELLED (today: its worker was retired while it was
+ * in flight — claimNextRun never picks up a retired worker's run, so parking it in QUEUED/WAITING would strand it).
+ */
+export class RunCancelled extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = "RunCancelled";
+  }
+}
+
+export const WORKER_RETIRED_REASON = "Cancelled because the worker was retired";
+
 /** Errors whose cause is the run's own definition or a hard rule: retrying would only repeat them. */
 const NON_RETRYABLE: ReadonlySet<AppErrorCode> = new Set<AppErrorCode>([
   "LIMIT_EXCEEDED",

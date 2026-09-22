@@ -1,11 +1,15 @@
 import type { SimSearchResult } from "@/server/simulation/types";
 import { COMPARE_HOST, DIRECTORY_HOST, GROUPS, NEWS_HOST, REVIEWS_HOST, buildRoundups, urls, type Roundup } from "./catalog";
+import { constraintMisses, countryOfLocation, parseConstraints, regionOfCountry, type JobConstraints, type Sector } from "./constraints";
 import { isoDaysAgo, isoNoon } from "./dates";
-import { CATEGORY_GROUPS, companyEntities, type CategoryGroup, type CompanyEntity } from "./fixtures/companies";
+import { CATEGORY_GROUPS, type CategoryGroup, type CompanyEntity } from "./fixtures/companies";
 import { FEEDBACK_CATEGORIES, feedbackItems } from "./fixtures/feedback";
+import { financeResults, FINANCE_TERMS } from "./finance-web";
+import { allCompanyEntities, sectorEntities } from "./fixtures/fintech";
 import { pricingFor } from "./fixtures/pricing";
 import { hashSeed, seededInt, seededShuffle } from "./rng";
 import { clip, formatUsdShort, keywords, sentenceCase, slugify, stem, titleCase, tokenize } from "./text";
+import { extractVendorNames, fixtureSlugOf, syntheticVendor, type SyntheticVendor } from "./vendors";
 
 /**
  * `search` — keyword-routed, deterministic web search over the fixture "web" (see catalog.ts).
@@ -13,20 +17,26 @@ import { clip, formatUsdShort, keywords, sentenceCase, slugify, stem, titleCase,
  * searches genuinely widens its coverage.
  */
 
-export type SearchRoute = "companies" | "pricing" | "feedback" | "generic";
+export type SearchRoute = "companies" | "pricing" | "feedback" | "finance" | "generic";
 
 const DEFAULT_RESULTS = 6;
 const MAX_RESULTS = 10;
 
 const ROUTE_TERMS: Record<Exclude<SearchRoute, "generic">, ReadonlySet<string>> = {
   pricing: new Set(["pricing", "price", "priced", "plan", "competitor", "competitive", "comparison", "compare", "versus", "vs", "cost", "tier", "discount", "packaging"]),
-  feedback: new Set(["feedback", "review", "complaint", "nps", "churn", "testimonial", "sentiment", "satisfaction", "csat", "voice"]),
+  // "review" alone is usually the verb ("review our SaaS spend"); the plural and "customer reviews" count (routeQuery).
+  feedback: new Set(["feedback", "complaint", "nps", "churn", "testimonial", "sentiment", "satisfaction", "csat", "voice"]),
   companies: new Set([
     "funding", "funded", "raise", "raised", "startup", "series", "seed", "venture", "investor", "investment", "round", "infrastructure",
     "infra", "gpu", "vector", "inference", "llm", "mlops", "labeling", "annotation", "agent", "tuning", "edge", "ai", "ml", "model",
     "company", "lead", "prospect", "icp", "account", "observability", "evaluation", "eval", "synthetic", "gateway", "training",
+    "fintech", "neobank", "insurtech", "wealthtech", "regtech",
   ]),
+  finance: FINANCE_TERMS,
 };
+
+/** "customer reviews", "app reviews", "G2 reviews" — the noun, not the verb. */
+const REVIEW_NOUN = /\b(customer|user|app|product|store|g2|capterra|trustpilot|online)\s+reviews?\b|\breviews\s+(from|of|by)\s+(customers|users)\b/i;
 
 const LEAD_TERMS = new Set(["lead", "prospect", "icp", "contact", "decision", "buyer", "outbound", "account", "sdr", "email"]);
 
@@ -41,11 +51,12 @@ const NON_DISCRIMINATING = new Set([
 export function routeQuery(query: string): SearchRoute {
   const terms = tokenize(query).map(stem);
   const score = (route: Exclude<SearchRoute, "generic">) => terms.filter((t) => ROUTE_TERMS[route].has(t)).length;
-  // Pricing/feedback vocabulary is specific; company vocabulary is broad — so the specific routes count double.
+  // Pricing/feedback/finance vocabulary is specific; company vocabulary is broad — so the specific routes count double.
   const scores: Array<[SearchRoute, number]> = [
     ["companies", score("companies")],
     ["pricing", score("pricing") * 2],
-    ["feedback", score("feedback") * 2],
+    ["feedback", (score("feedback") + (REVIEW_NOUN.test(query) || /\breviews\b/i.test(query) ? 1 : 0)) * 2],
+    ["finance", score("finance") * 2],
   ];
   const [best, bestScore] = scores.reduce((a, b) => (b[1] > a[1] ? b : a));
   return bestScore > 0 ? best : "generic";
@@ -56,7 +67,7 @@ function relevance(c: CompanyEntity, terms: readonly string[], queryLower: strin
   const bag = (s: string) => new Set(tokenize(s).map(stem));
   const name = bag(c.company);
   const category = bag(`${c.category} ${CATEGORY_GROUPS[c.group].label}`);
-  const place = bag(`${c.hq} ${c.lead_investor}`);
+  const place = bag(`${c.hq} ${c.lead_investor} ${placeWords(c.hq)}`);
   const description = bag(c.description);
   let score = 0;
   for (const t of terms) {
@@ -67,6 +78,20 @@ function relevance(c: CompanyEntity, terms: readonly string[], queryLower: strin
   }
   if (new RegExp(`\\b${c.stage.toLowerCase()}\\b`).test(queryLower)) score += 4;
   return score;
+}
+
+const REGION_WORDS: Record<string, string> = {
+  Europe: "europe european eu emea",
+  "North America": "america american usa",
+  "Asia-Pacific": "asia apac",
+  "Middle East": "mena",
+};
+
+/** Region words for an HQ, so "startups in Europe" can match "Berlin, Germany". */
+function placeWords(hq: string): string {
+  const country = countryOfLocation(hq);
+  const region = regionOfCountry(country);
+  return [country ?? "", region ? REGION_WORDS[region] : ""].join(" ");
 }
 
 /** How strongly a company matches a query's discriminating words (0 = not at all). Pure; no tie-breaking. */
@@ -119,6 +144,26 @@ function pricingResult(c: CompanyEntity, now: Date): SimSearchResult {
   };
 }
 
+function vendorPricingResult(v: SyntheticVendor, now: Date): SimSearchResult {
+  return {
+    title: `Pricing — ${v.company}`,
+    url: v.pricing.pricing_url,
+    snippet: clip(`${v.company} pricing: ${v.pricing.pricing_model.toLowerCase()}. Plans: ${v.pricing.plans.map((p) => p.name).join(", ")}. Illustrative prices (simulated).`, 260),
+    source: `${v.slug}.example`,
+    publishedAt: isoNoon(isoDaysAgo(seededInt(hashSeed(`${v.slug}|pricing-page`), 3, 40), now)),
+  };
+}
+
+/** Pricing pages of the vendors a query names ("compare Notion, Coda and Airtable pricing"), in the query's order. */
+function namedPricingResults(query: string, now: Date): SimSearchResult[] {
+  const all = allCompanyEntities(now);
+  return extractVendorNames(query).map((name) => {
+    const slug = fixtureSlugOf(name);
+    const fixture = slug ? all.find((c) => c.slug === slug) : undefined;
+    return fixture ? pricingResult(fixture, now) : vendorPricingResult(syntheticVendor(name), now);
+  });
+}
+
 function roundupResult(r: Roundup, now: Date): SimSearchResult {
   const names = r.members.slice(0, 5).map((c) => `${c.company} (${formatUsdShort(c.amount_usd)} ${c.stage})`);
   return {
@@ -157,8 +202,32 @@ function bestGroups(ranked: readonly CompanyEntity[]): CategoryGroup[] {
   return GROUPS.slice().sort((a, b) => top.filter((c) => c.group === b).length - top.filter((c) => c.group === a).length);
 }
 
+const SECTOR_NOUN: Record<Sector, string> = { ai_infrastructure: "AI infrastructure", fintech: "fintech" };
+
+/**
+ * A query that names a stage or a place ("Series A fintech companies in Europe") gets a directory search that
+ * lists exactly the matching companies — the page a researcher would actually find first.
+ */
+function directorySearchResult(sector: Sector, c: JobConstraints, companies: readonly CompanyEntity[], now: Date): SimSearchResult | null {
+  if (c.stages.length === 0 && c.regions.length === 0) return null;
+  const matching = companies.filter((co) => constraintMisses({ stage: co.stage, location: co.hq }, c).length === 0);
+  if (matching.length === 0) return null;
+  const stage = c.stages.length > 0 ? `${c.stages.join(" / ")} ` : "";
+  const place = c.countries.length > 0 ? ` in ${c.countries.join(" / ")}` : c.regions.length > 0 ? ` in ${c.regions.join(" / ")}` : "";
+  const names = matching.slice(0, 5).map((co) => co.company).join(", ");
+  return {
+    title: `${stage}${SECTOR_NOUN[sector]} companies${place} — ${matching.length} results`,
+    url: urls.directorySearch(sector, c),
+    snippet: clip(`Directory search: ${matching.length} ${SECTOR_NOUN[sector]} companies${stage ? ` at ${stage.trim()}` : ""}${place}, with HQ, team size, latest round and a key contact: ${names} and others.`, 300),
+    source: DIRECTORY_HOST,
+    publishedAt: isoNoon(isoDaysAgo(2, now)),
+  };
+}
+
 function companyResults(query: string, limit: number, now: Date): SimSearchResult[] {
-  const companies = companyEntities(now);
+  const constraints = parseConstraints(query);
+  const sector = constraints.sector ?? "ai_infrastructure";
+  const companies = sectorEntities(sector, now);
   const ranked = rankCompanies(query, companies);
   const leadFlavor = tokenize(query).map(stem).some((t) => LEAD_TERMS.has(t));
   // A query that names nothing specific ("recent AI infra funding") is about recency: its hub pages are the
@@ -166,15 +235,17 @@ function companyResults(query: string, limit: number, now: Date): SimSearchResul
   const score = companyRelevance(query);
   const specific = ranked.some((c) => score(c) > 0);
   const top = new Set((specific ? ranked : companies).slice(0, 8).map((c) => c.slug));
-  const roundups = buildRoundups(companies)
+  const roundups = buildRoundups(companies, sector)
     .map((r, i) => ({ r, i, hits: r.members.filter((m) => top.has(m.slug)).length }))
     .sort((a, b) => b.hits - a.hits || a.i - b.i)
     .map((x) => x.r);
 
   // Hub pages (many companies per page) lead; single-company pages fill the rest.
-  const hubs: SimSearchResult[] = leadFlavor
+  const standardHubs: SimSearchResult[] = leadFlavor
     ? [groupPageResult("directory", bestGroups(ranked)[0], companies, now), roundupResult(roundups[0], now)]
     : [roundupResult(roundups[0], now), roundupResult(roundups[1], now)];
+  const filtered = directorySearchResult(sector, constraints, companies, now);
+  const hubs = filtered ? [filtered, standardHubs[0]] : standardHubs;
   const singles = ranked.map((c, i) => (leadFlavor && i % 2 === 0 ? aboutResult(c, now) : articleResult(c)));
 
   const out: SimSearchResult[] = [];
@@ -188,7 +259,7 @@ function companyResults(query: string, limit: number, now: Date): SimSearchResul
 }
 
 function pricingResults(query: string, limit: number, now: Date): SimSearchResult[] {
-  const companies = companyEntities(now);
+  const companies = sectorEntities(parseConstraints(query).sector, now);
   const ranked = rankCompanies(query, companies);
   const groups = bestGroups(ranked);
   const out: SimSearchResult[] = [];
@@ -198,7 +269,11 @@ function pricingResults(query: string, limit: number, now: Date): SimSearchResul
     else if (i === 3 && limit >= 5) out.push(groupPageResult("compare", groups[1], companies, now));
     else if (s < ranked.length) out.push(pricingResult(ranked[s++], now));
   }
-  return out;
+  // Vendors the query names come first — that is who the customer asked about — then the usual comparison pages.
+  const named = namedPricingResults(query, now);
+  if (named.length === 0) return out;
+  const namedUrls = new Set(named.map((r) => r.url));
+  return [...named, ...out.filter((r) => !namedUrls.has(r.url))].slice(0, limit);
 }
 
 function feedbackResults(query: string, limit: number, now: Date): SimSearchResult[] {
@@ -265,5 +340,6 @@ export function search(query: string, opts: { maxResults?: number } | undefined,
   if (route === "companies") return companyResults(query, limit, now);
   if (route === "pricing") return pricingResults(query, limit, now);
   if (route === "feedback") return feedbackResults(query, limit, now);
+  if (route === "finance") return financeResults(query, limit, now);
   return genericResults(query, limit, now);
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CostEstimateSchema, runsPerMonth, type AgentComponent, type WorkerBlueprint } from "@/server/domain";
 import { llm } from "@/server/models";
 import { designBlueprint, draftFromTemplate, estimateCost } from "@/server/staffing";
-import { estimateTurns } from "@/server/staffing/cost";
+import { QUALITY_REVIEW_ID, estimateTurns } from "@/server/staffing/cost";
 import { tools } from "@/server/tools";
 import { makeBlueprint } from "../helpers/fixtures";
 import { specFor } from "./helpers";
@@ -22,11 +22,11 @@ function withCollectorTier(bp: Uncosted, modelTier: AgentComponent["modelTier"])
 describe("staffing: estimateCost", () => {
   const base = uncosted(makeBlueprint({ withNotifier: true }));
 
-  it("returns a schema-valid estimate with one breakdown item per component, deterministic steps free", () => {
+  it("returns a schema-valid estimate with one breakdown item per component plus the quality review, deterministic steps free", () => {
     const est = estimateCost(base);
     expect(CostEstimateSchema.safeParse(est).success).toBe(true);
-    expect(est.breakdown.map((b) => b.componentId)).toEqual(base.components.map((c) => c.id));
-    for (const item of est.breakdown) {
+    expect(est.breakdown.map((b) => b.componentId)).toEqual([...base.components.map((c) => c.id), QUALITY_REVIEW_ID]);
+    for (const item of est.breakdown.filter((b) => b.componentId !== QUALITY_REVIEW_ID)) {
       const component = base.components.find((c) => c.id === item.componentId)!;
       if (component.type === "deterministic") {
         expect(item).toMatchObject({ estModelCalls: 0, estInputTokens: 0, estOutputTokens: 0, estToolCalls: 0, costUsd: 0 });
@@ -62,6 +62,22 @@ describe("staffing: estimateCost", () => {
     expect(analyst.estModelCalls).toBe(2); // no tools → min(maxTurns 2, 2)
     expect(analyst.estOutputTokens).toBe(500 * 2); // markdown
     expect(analyst.estToolCalls).toBe(0);
+  });
+
+  it("prices the quality review that every successful run pays for (one standard-tier judge call)", () => {
+    const est = estimateCost(base);
+    const review = est.breakdown.find((b) => b.componentId === QUALITY_REVIEW_ID)!;
+    const records = base.kpis.find((k) => k.metric === "records_per_run")?.target ?? 12;
+    const input = 900 + 70 * Math.min(20, records) + 600; // brief + rubric, sampled records, markdown report
+    const output = 150 + 40 * base.evaluation.rubric.length;
+    expect(review).toMatchObject({ label: "Quality review", modelTier: "standard", estModelCalls: 1, estToolCalls: 0, estInputTokens: input, estOutputTokens: output });
+    expect(review.costUsd).toBeCloseTo(llm.estimateCostUsd("standard", input, output), 6);
+    expect(est.assumptions.join(" ")).toMatch(/quality review/i);
+    // It scales with the records the reviewer reads, not with the pipeline's tier.
+    const csv = estimateCost({ ...base, deliverable: { ...base.deliverable, format: "csv" } }).breakdown.find((b) => b.componentId === QUALITY_REVIEW_ID)!;
+    expect(csv.estInputTokens).toBe(input - 400);
+    const fast = estimateCost(withCollectorTier(base, "fast")).breakdown.find((b) => b.componentId === QUALITY_REVIEW_ID)!;
+    expect(fast.costUsd).toBe(review.costUsd);
   });
 
   it("is monotonic in model tier: reasoning > standard > fast for the same pipeline", () => {

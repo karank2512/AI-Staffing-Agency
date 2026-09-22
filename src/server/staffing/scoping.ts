@@ -6,7 +6,6 @@ import {
   JobSpecLlmSchema,
   JobSpecSchema,
   ScopingQuestionsSchema,
-  detectJobFamily,
   type IntakeAnswers,
   type JobFamily,
   type JobSpec,
@@ -15,6 +14,7 @@ import {
 import { AppError, conflict, invalid } from "@/server/errors";
 import { llm } from "@/server/models";
 import { tools } from "@/server/tools";
+import { detectFamily } from "./family-cues";
 import { getJob, nextSpecVersion, parseIntake } from "./jobs";
 import { normalizeJobSpecLlm, normalizeScopingQuestions } from "./normalize";
 import { SCOPING_QUESTIONS_SYSTEM, SPEC_SYSTEM, buildScopingQuestionsPrompt, buildSpecPrompt } from "./prompts";
@@ -33,7 +33,7 @@ export async function scopeJob(s: SessionContext, description: string): Promise<
   if (text.length < MIN_DESCRIPTION_CHARS) throw invalid("Describe the job in a sentence or two so it can be scoped.");
   if (text.length > MAX_DESCRIPTION_CHARS) throw invalid(`Keep the description under ${MAX_DESCRIPTION_CHARS.toLocaleString("en-US")} characters.`);
 
-  const familyHint: JobFamily = detectJobFamily(text);
+  const familyHint: JobFamily = detectFamily(text);
   const { object: questions } = await llm.generateObject(
     {
       tier: "fast",
@@ -76,7 +76,7 @@ export async function scopeJob(s: SessionContext, description: string): Promise<
 /** Job.jobFamily is a plain string column; fall back to detection if it ever holds an unknown slug. */
 function storedFamily(slug: string, description: string): JobFamily {
   const parsed = JobFamilySchema.safeParse(slug);
-  return parsed.success ? parsed.data : detectJobFamily(description);
+  return parsed.success ? parsed.data : detectFamily(description);
 }
 
 /** Keep answers for questions we asked; trim; drop skipped ones. */

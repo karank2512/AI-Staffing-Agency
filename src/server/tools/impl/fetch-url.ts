@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import { AppError, errorMessage } from "@/server/errors";
 import { simulation } from "@/server/simulation";
 import { defineTool, quote } from "../define";
+import { transport, type FetchLike } from "../guarded-http";
 import { checkUrl, checkUrlSyntax, type LookupFn } from "../net-guard";
 import type { ToolOutput } from "../schemas";
 
@@ -15,7 +16,8 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 type PageKind = "html" | "text" | "json";
 
 export interface FetchDeps {
-  fetch: typeof fetch;
+  /** Default: the guarded HTTP client (connection-time address check with `lookup`). Tests inject a stub. */
+  fetch: FetchLike;
   lookup?: LookupFn;
 }
 
@@ -127,11 +129,13 @@ async function request(url: URL, deps: FetchDeps, signal: AbortSignal): Promise<
 }
 
 /**
- * Live path: validate → fetch with manual redirects (each hop re-validated against the network guard) →
+ * Live path: validate → fetch with manual redirects (each hop re-validated against the network guard, and every
+ * connection re-checked at connect time by the guarded client, so DNS rebinding cannot reach a blocked address) →
  * stream the body up to the cap → convert to text by content type. Throws AppError("TOOL_ERROR") on any problem.
  */
 export async function fetchUrlLive(raw: string, deps: Partial<FetchDeps> = {}): Promise<ToolOutput<"fetch_url">> {
-  const resolved: FetchDeps = { fetch: deps.fetch ?? ((input, init) => fetch(input, init)), lookup: deps.lookup };
+  const lookup = deps.lookup;
+  const resolved: FetchDeps = { fetch: deps.fetch ?? ((url, init) => transport.fetch(url, init, { lookup })), lookup };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {

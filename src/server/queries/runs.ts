@@ -27,6 +27,19 @@ export const EVALUATION_GRACE_MS = 3 * 60_000;
 
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 
+/**
+ * Active time to show for a run. Run.durationMs is only written on the terminal transition; until then the executor
+ * keeps the running total in checkpoint.counters.activeMs (refreshed at every checkpoint save), so a paused or
+ * in-flight run reports its time so far instead of a blank. The checkpoint is read defensively — seed rows and
+ * older checkpoints may lack counters. Zero means "hasn't done any work yet" and stays null.
+ */
+export function activeTimeMs(durationMs: number | null, checkpoint: unknown): number | null {
+  if (durationMs !== null) return durationMs;
+  const counters = checkpoint && typeof checkpoint === "object" ? (checkpoint as { counters?: unknown }).counters : null;
+  const ms = counters && typeof counters === "object" ? (counters as { activeMs?: unknown }).activeMs : null;
+  return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? Math.round(ms) : null;
+}
+
 // ── Live view ───────────────────────────────────────────────────────────────
 
 export async function getRunLiveView(organizationId: string, runId: string): Promise<RunLiveView> {
@@ -44,6 +57,7 @@ export async function getRunLiveView(organizationId: string, runId: string): Pro
       inputTokens: true,
       outputTokens: true,
       durationMs: true,
+      checkpoint: true,
       createdAt: true,
       startedAt: true,
       finishedAt: true,
@@ -86,7 +100,7 @@ export async function getRunLiveView(organizationId: string, runId: string): Pro
       costUsd: Number(run.costUsd),
       inputTokens: run.inputTokens,
       outputTokens: run.outputTokens,
-      durationMs: run.durationMs,
+      durationMs: activeTimeMs(run.durationMs, run.checkpoint),
       createdAt: run.createdAt.toISOString(),
       startedAt: iso(run.startedAt),
       finishedAt: iso(run.finishedAt),
@@ -363,7 +377,7 @@ export async function getRunDetail(organizationId: string, runId: string): Promi
       costUsd: Number(run.costUsd),
       inputTokens: run.inputTokens,
       outputTokens: run.outputTokens,
-      durationMs: run.durationMs,
+      durationMs: activeTimeMs(run.durationMs, run.checkpoint),
       createdAt: run.createdAt.toISOString(),
       startedAt: iso(run.startedAt),
       finishedAt: iso(run.finishedAt),
@@ -449,6 +463,7 @@ export interface RunListItem {
   attempt: number;
   error: string | null;
   costUsd: number;
+  /** Active time: final for terminal runs, the running total so far otherwise (see `activeTimeMs`). */
   durationMs: number | null;
   createdAt: string;
   finishedAt: string | null;
@@ -510,6 +525,13 @@ export async function listRuns(organizationId: string, filters: RunListFilters =
       deliverables: { orderBy: { createdAt: "asc" }, take: 1, select: { id: true, title: true } },
     },
   });
+  // Only runs without a final duration need their checkpoint (it can be large — agent transcripts), so fetch those alone.
+  const openIds = rows.filter((r) => r.durationMs === null).map((r) => r.id);
+  const checkpoints = openIds.length
+    ? await db.run.findMany({ where: { id: { in: openIds }, organizationId }, select: { id: true, checkpoint: true } })
+    : [];
+  const checkpointOf = new Map(checkpoints.map((c) => [c.id, c.checkpoint]));
+
   return rows.map((r) => ({
     id: r.id,
     status: r.status,
@@ -518,7 +540,7 @@ export async function listRuns(organizationId: string, filters: RunListFilters =
     attempt: r.attempt,
     error: r.error,
     costUsd: Number(r.costUsd),
-    durationMs: r.durationMs,
+    durationMs: activeTimeMs(r.durationMs, checkpointOf.get(r.id)),
     createdAt: r.createdAt.toISOString(),
     finishedAt: iso(r.finishedAt),
     worker: r.worker,

@@ -13,7 +13,8 @@ import { AppError } from "@/server/errors";
 import { tools } from "@/server/tools";
 import { estimateCost } from "./cost";
 import { extractEmails, looksNumeric, specText } from "./cues";
-import { deriveEvaluationPlan, deriveKpis, requiredFieldNames, usableKeyFields } from "./kpis";
+import { deriveEvaluationPlan, deriveKpis, maxCostPerRun, requiredFieldNames, usableKeyFields } from "./kpis";
+import { feedbackTablePlan, type FeedbackTablePlan } from "./notable-feedback";
 import { buildPersona } from "./persona";
 
 /**
@@ -58,7 +59,7 @@ function schemaHint(fields: readonly string[]): string {
   return fields.length > 0 ? `array of {${fields.join(", ")}}` : "array of flat records, one object per item found";
 }
 
-function collectorOutputRules(spec: JobSpec): string {
+function collectorOutputRules(spec: JobSpec, extraRules: readonly string[] = []): string {
   const fields = spec.deliverable.fields;
   const lines = ["", "Output contract for this job:"];
   if (fields.length > 0) {
@@ -69,16 +70,16 @@ function collectorOutputRules(spec: JobSpec): string {
     lines.push("- Your final answer is a JSON array of flat objects, one per item, with consistent snake_case keys.");
   }
   if (spec.deliverable.targetCount) lines.push(`- Aim for about ${spec.deliverable.targetCount} records; quality and completeness beat volume.`);
-  lines.push("- No prose before or after the JSON.");
+  lines.push(...extraRules, "- No prose before or after the JSON.");
   return lines.join("\n");
 }
 
-function analystOutputRules(narrative: readonly string[], hasStats: boolean): string {
+function analystOutputRules(narrative: readonly string[], hasStats: boolean, tableLabel: string): string {
   const [first, ...rest] = narrative;
   const lines = ["", "Output rules for this job:"];
   lines.push(`- Your text is inserted under the heading "${first}". Do not repeat that heading; start directly with the prose.`);
   if (rest.length > 0) lines.push(`- Then add these sections in this order, each under a "### <heading>" heading: ${rest.join(" · ")}.`);
-  lines.push(`- The full records table${hasStats ? " and the breakdown" : ""} are appended automatically after your text; cite specific rows, but do not reproduce the whole table.`);
+  lines.push(`- ${tableLabel}${hasStats ? " and the breakdown" : ""} are appended automatically after your text; cite specific rows, but do not reproduce the whole table.`);
   return lines.join("\n");
 }
 
@@ -96,8 +97,35 @@ function agent(args: Omit<AgentComponent, "type">): AgentComponent {
   return { type: "agent", ...args };
 }
 
+const isLinkField = (name: string) => /(?:^|_)(?:url|link|source)$/.test(name) || name === "website";
+
+/**
+ * The records-table columns of a markdown report, capped at MAX_TABLE_COLUMNS. When the spec has more fields
+ * than fit, the cut falls on optional detail — never on a required field or on the source link that makes a row
+ * checkable. Columns keep the spec's order, with the rank first.
+ */
+export function reportTableColumns(fields: ReadonlyArray<{ name: string; required: boolean }>, ranked: boolean): string[] | undefined {
+  if (fields.length === 0) return undefined;
+  const budget = MAX_TABLE_COLUMNS - (ranked ? 1 : 0);
+  const chosen = new Set<string>();
+  const take = (names: string[]) => {
+    for (const name of names) if (chosen.size < budget) chosen.add(name);
+  };
+  take(fields.filter((f) => f.required).map((f) => f.name));
+  take(fields.filter((f) => !f.required && isLinkField(f.name)).map((f) => f.name));
+  take(fields.map((f) => f.name));
+  return [...(ranked ? ["rank"] : []), ...fields.map((f) => f.name).filter((name) => chosen.has(name))];
+}
+
+interface ReportLayout {
+  sections: ReportSection[];
+  narrative: string[];
+  /** The feedback shortlist table (feedback_analysis only): its extra steps, collector rule and analyst wording. */
+  feedbackTable?: FeedbackTablePlan;
+}
+
 /** Assign the spec's report sections to what the pipeline produces: prose, the records table, the stats block. */
-function reportSections(spec: JobSpec, args: { fields: readonly string[]; hasStats: boolean; ranked: boolean }): { sections: ReportSection[]; narrative: string[] } {
+function reportSections(spec: JobSpec, args: { hasStats: boolean; ranked: boolean; rankedBy?: { by: string; direction: "asc" | "desc" } }): ReportLayout {
   const headings = [...new Set(spec.deliverable.sections.map(clean).filter((h) => h.length > 0))];
   const narrative: string[] = [];
   let tableHeading: string | undefined;
@@ -109,9 +137,16 @@ function reportSections(spec: JobSpec, args: { fields: readonly string[]; hasSta
   }
   if (narrative.length === 0) narrative.push("Summary");
 
-  const columns = args.fields.length > 0 ? [...(args.ranked ? ["rank"] : []), ...args.fields].slice(0, MAX_TABLE_COLUMNS) : undefined;
-  const maxRows = spec.deliverable.targetCount ? Math.max(10, Math.round(spec.deliverable.targetCount * RANK_LIMIT_FACTOR)) : 25;
-  const table: ReportSection = { heading: tableHeading ?? "Records", sourceKey: "records", as: "table", ...(columns ? { columns } : {}), maxRows };
+  const feedbackTable = feedbackTablePlan(spec, { tableHeading, ranked: args.ranked, rankedBy: args.rankedBy });
+  const columns = feedbackTable ? feedbackTable.table.columns : reportTableColumns(spec.deliverable.fields, args.ranked);
+  const defaultMaxRows = spec.deliverable.targetCount ? Math.max(10, Math.round(spec.deliverable.targetCount * RANK_LIMIT_FACTOR)) : 25;
+  const table: ReportSection = {
+    heading: tableHeading ?? feedbackTable?.heading ?? "Records",
+    sourceKey: feedbackTable?.table.sourceKey ?? "records",
+    as: "table",
+    ...(columns ? { columns } : {}),
+    maxRows: feedbackTable?.table.maxRows ?? defaultMaxRows,
+  };
   const stats: ReportSection | undefined = args.hasStats ? { heading: statsHeading ?? "Breakdown", sourceKey: "stats", as: "stats" } : undefined;
   const prose: ReportSection = { heading: narrative[0], sourceKey: "insights", as: "markdown" };
 
@@ -125,7 +160,7 @@ function reportSections(spec: JobSpec, args: { fields: readonly string[]; hasSta
   if (!sections.includes(prose)) sections.unshift(prose);
   if (!sections.includes(table)) sections.push(table);
   if (stats && !sections.includes(stats)) sections.push(stats);
-  return { sections, narrative };
+  return { sections, narrative, ...(feedbackTable ? { feedbackTable } : {}) };
 }
 
 export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { usedNames?: string[] } = {}): WorkerBlueprint {
@@ -137,6 +172,11 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
   const groupBy = fieldSet.has(clean(draft.groupBy)) ? clean(draft.groupBy) : undefined;
   const target = spec.deliverable.targetCount;
   const format = spec.deliverable.format;
+  const ranked = draft.steps.rank && rankBy !== undefined;
+  const hasStats = draft.steps.computeStats && groupBy !== undefined;
+  // Decided up front: the report's table can add a collector output rule as well as its own pipeline steps.
+  const layout = format === "markdown" ? reportSections(spec, { hasStats, ranked, rankedBy: ranked && rankBy ? { by: rankBy, direction: draft.rankDirection } : undefined }) : undefined;
+  const tablePlan = layout?.feedbackTable;
   const components: BlueprintComponent[] = [];
 
   components.push(
@@ -145,7 +185,7 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
       name: nonEmpty(draft.collector.name, "Collector"),
       description: nonEmpty(draft.collector.description, `Gathers the records behind the ${spec.deliverable.title}.`),
       goal: nonEmpty(draft.collector.goal, `Collect the records the ${spec.deliverable.title} is built from.`),
-      instructions: withOutputRules(draft.collector.instructions, collectorOutputRules(spec)),
+      instructions: withOutputRules(draft.collector.instructions, collectorOutputRules(spec, tablePlan?.collectorRule ? [tablePlan.collectorRule] : [])),
       modelTier: draft.collector.modelTier,
       tools: collectorTools(draft),
       maxTurns: COLLECTOR_MAX_TURNS,
@@ -180,7 +220,6 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
       outputKey: "records",
     });
   }
-  const ranked = draft.steps.rank && rankBy !== undefined;
   if (ranked && rankBy) {
     components.push({
       type: "deterministic",
@@ -193,7 +232,6 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
       outputKey: "records",
     });
   }
-  const hasStats = draft.steps.computeStats && groupBy !== undefined;
   if (hasStats && groupBy) {
     components.push({
       type: "deterministic",
@@ -208,15 +246,18 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
   }
 
   let contentKey: string;
-  if (format === "markdown") {
-    const { sections, narrative } = reportSections(spec, { fields, hasStats, ranked });
+  if (layout) {
+    const { sections, narrative } = layout;
+    const table = sections.find((s) => s.as === "table");
+    const tableKey = table?.sourceKey ?? "records";
+    if (tablePlan) components.push(...tablePlan.components);
     components.push(
       agent({
         id: "analyst",
         name: nonEmpty(draft.analyst.name, "Analyst"),
         description: nonEmpty(draft.analyst.description, `Writes the narrative for the ${spec.deliverable.title}.`),
         goal: nonEmpty(draft.analyst.goal, `Turn the collected records into the insights the ${spec.deliverable.title} needs.`),
-        instructions: withOutputRules(draft.analyst.instructions, analystOutputRules(narrative, hasStats)),
+        instructions: withOutputRules(draft.analyst.instructions, analystOutputRules(narrative, hasStats, tablePlan?.analystLabel ?? "The full records table")),
         modelTier: draft.analyst.modelTier,
         tools: [],
         maxTurns: ANALYST_MAX_TURNS,
@@ -228,10 +269,10 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
         type: "deterministic",
         id: "compile_report",
         name: "Compile report",
-        description: `Assemble the ${spec.deliverable.title} from the insights, the records table${hasStats ? " and the breakdown" : ""}.`,
+        description: `Assemble the ${spec.deliverable.title} from the insights, the ${tableKey === "records" ? "records table" : `${table?.heading ?? "records"} shortlist`}${hasStats ? " and the breakdown" : ""}.`,
         operation: "compile_report",
         config: { title: spec.deliverable.title, sections, includeMethodology: true },
-        inputKeys: ["insights", "records", ...(hasStats ? ["stats"] : [])],
+        inputKeys: ["insights", "records", ...(hasStats ? ["stats"] : []), ...(tableKey === "records" ? [] : [tableKey])],
         outputKey: "report",
       },
     );
@@ -306,7 +347,8 @@ export function designBlueprint(spec: JobSpec, draft: BlueprintDraft, opts: { us
     evaluation: deriveEvaluationPlan(spec, { keyFields }),
     deliverable: { titleTemplate: `${spec.deliverable.title} — {{date}}`, format, contentKey, dataKey: "records" },
     schedule: spec.cadence,
-    limits: { ...DEFAULT_RUN_LIMITS, ...(spec.budget.maxCostPerRunUsd ? { maxCostPerRunUsd: spec.budget.maxCostPerRunUsd } : {}) },
+    // The same ceiling the cost KPI and the max_cost_usd check use (kpis.ts), so the three never disagree.
+    limits: { ...DEFAULT_RUN_LIMITS, maxCostPerRunUsd: maxCostPerRun(spec) },
   };
   const candidate: WorkerBlueprint = { ...withoutCost, costEstimate: estimateCost(withoutCost) };
 
