@@ -2,7 +2,7 @@
 
 **Product:** the staffing agency for AI workers. A company describes a job in plain English → the platform scopes it (JobSpec) → designs an AI worker (WorkerBlueprint) → the user *hires* it → it executes runs → produces deliverables → is evaluated → can be talked to, improved, or *replaced* like a contractor. Core loop: **Job → Worker → Runs → Deliverables → Evaluation → Replace.**
 
-**Read `docs/CONTRACTS.md` before writing any code.** It defines module boundaries, public function signatures, and file ownership. The typed contracts live in code: `prisma/schema.prisma`, `src/server/domain/*`, `src/server/*/types.ts`.
+**Read `docs/CONTRACTS.md` before writing any code.** For the production/security/redesign phase also read `docs/PRODUCTION.md` (contracts + file ownership that override the FROZEN list for assigned files) and `docs/DESIGN.md` (the design system every UI change follows). It defines module boundaries, public function signatures, and file ownership. The typed contracts live in code: `prisma/schema.prisma`, `src/server/domain/*`, `src/server/*/types.ts`.
 
 ## Stack (pinned — do not upgrade or swap)
 Next.js 15 App Router · React 19 · strict TypeScript · Tailwind v4 · shadcn/ui (radix, components already in `src/components/ui`) · Prisma 6 + PostgreSQL 14 · Auth.js v5 (credentials) · Vercel AI SDK **v5** (`ai@5`, `@ai-sdk/*@2`) · Zod **v4** · Vitest · lucide-react · recharts · date-fns · sonner.
