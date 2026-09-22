@@ -1,0 +1,108 @@
+import { z } from "zod";
+import { AppError, errorMessage } from "@/server/errors";
+import { simulation } from "@/server/simulation";
+import { defineTool, plural, quote } from "../define";
+import type { SearchResult } from "../schemas";
+
+export const TAVILY_SECRET = "TAVILY_API_KEY";
+export const TAVILY_ENDPOINT = "https://api.tavily.com/search";
+const TAVILY_TIMEOUT_MS = 10_000;
+const DEFAULT_RESULTS = 6;
+
+/** Lenient view of Tavily's response — only what we map; unknown fields are ignored. */
+const TavilyResponseSchema = z.object({
+  results: z
+    .array(
+      z.object({
+        title: z.string().nullish(),
+        url: z.string().min(1),
+        content: z.string().nullish(),
+        published_date: z.string().nullish(),
+      }),
+    )
+    .default([]),
+});
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+export function mapTavilyResults(raw: unknown, maxResults: number): SearchResult[] {
+  const parsed = TavilyResponseSchema.safeParse(raw);
+  if (!parsed.success) throw new AppError("TOOL_ERROR", "Tavily returned an unexpected response shape");
+  return parsed.data.results.slice(0, maxResults).map((r) => ({
+    title: r.title?.trim() || r.url,
+    url: r.url,
+    snippet: (r.content ?? "").replace(/\s+/g, " ").trim(),
+    source: hostOf(r.url),
+    publishedAt: r.published_date ?? "",
+  }));
+}
+
+/**
+ * Live search via Tavily. Any failure (network, timeout, auth, quota, bad JSON) is surfaced as an error — with a
+ * real key configured we never quietly substitute simulated results, which would poison a deliverable.
+ */
+export async function tavilySearch(apiKey: string, query: string, maxResults: number): Promise<SearchResult[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TAVILY_TIMEOUT_MS);
+  try {
+    let response: Response;
+    try {
+      response = await fetch(TAVILY_ENDPOINT, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ query, max_results: maxResults, search_depth: "basic", include_answer: false, include_raw_content: false }),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      const reason = controller.signal.aborted ? `timed out after ${TAVILY_TIMEOUT_MS / 1000} s` : errorMessage(e);
+      throw new AppError("TOOL_ERROR", `Web search failed: ${reason}`);
+    }
+    if (!response.ok) {
+      const hint = response.status === 401 || response.status === 403 ? " — check the Tavily API key in Settings" : "";
+      throw new AppError("TOOL_ERROR", `Web search failed: Tavily responded with HTTP ${response.status}${hint}`);
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new AppError("TOOL_ERROR", "Web search failed: Tavily returned invalid JSON");
+    }
+    return mapTavilyResults(body, maxResults);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const webSearchTool = defineTool("web_search", {
+  displayName: "Web search",
+  description:
+    "Search the web and get up to 10 results (title, url, snippet, source, publishedAt). Use specific queries; run several searches to widen coverage. Follow up with fetch_url to read a result in full.",
+  humanDescription: "Searches the web for recent, relevant sources.",
+  category: "research",
+  sideEffect: "external_read",
+  defaultRequiresApproval: false,
+  secretNames: [TAVILY_SECRET],
+  costPerCallUsd: 0.008,
+  humanize: (input) => `Searched the web for ${quote(input.query)}`,
+  describeForApproval: (input) => ({
+    title: `Search the web for ${quote(input.query)}`,
+    description: `Up to ${plural(input.maxResults ?? DEFAULT_RESULTS, "result")}.`,
+  }),
+  async execute(input, ctx) {
+    const maxResults = input.maxResults ?? DEFAULT_RESULTS;
+    if (!ctx.simulated) {
+      const apiKey = await ctx.getSecret(TAVILY_SECRET);
+      if (apiKey) {
+        const results = await tavilySearch(apiKey, input.query, maxResults);
+        return { output: { results }, simulated: false };
+      }
+    }
+    return { output: { results: simulation.search(input.query, { maxResults }) }, simulated: true };
+  },
+});

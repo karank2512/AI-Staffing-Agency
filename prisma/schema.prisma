@@ -1,0 +1,751 @@
+// AI Staffing Agency — core data model.
+//
+// Key invariant: Job → many WorkerVersions → many Runs.
+//   * A Worker is a persistent identity (the "seat" on a Job).
+//   * A WorkerVersion is an immutable blueprint. Once a Run references it, it is locked forever.
+//   * Runs always reference the exact WorkerVersion that produced them, which is what makes
+//     cross-version performance comparison possible.
+//
+// Every tenant-owned row carries organizationId. All reads/writes MUST be org-scoped.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum JobStatus {
+  DRAFT // intake captured, spec not approved yet
+  SPEC_APPROVED // spec approved, no worker hired yet
+  STAFFED // has an active worker
+  PAUSED
+  CLOSED
+}
+
+enum JobSpecStatus {
+  DRAFT
+  APPROVED
+  SUPERSEDED
+}
+
+enum WorkerStatus {
+  ACTIVE
+  PAUSED
+  RETIRED
+}
+
+enum WorkerHealth {
+  UNKNOWN // not enough data yet
+  HEALTHY
+  NEEDS_ATTENTION
+}
+
+enum WorkerVersionStatus {
+  PROPOSED // awaiting user decision (replacement / spec change)
+  ACTIVE
+  REPLACED // retired by a newer version; history preserved
+  REJECTED // proposal declined
+}
+
+enum VersionChangeReason {
+  INITIAL_HIRE
+  REPLACEMENT
+  SPEC_CHANGE
+  MANUAL
+}
+
+enum ScheduleKind {
+  MANUAL
+  HOURLY
+  DAILY
+  WEEKLY
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  WAITING_FOR_APPROVAL
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum RunTrigger {
+  MANUAL
+  SCHEDULED
+  RETRY
+  CHAT
+  HIRE // first run kicked off at hire time
+}
+
+enum RunStepKind {
+  PLAN
+  MODEL_CALL
+  TOOL_CALL
+  DETERMINISTIC
+  APPROVAL
+  DELIVERABLE
+  EVALUATION
+  NOTE
+  ERROR
+}
+
+enum RunStepStatus {
+  PENDING
+  RUNNING
+  WAITING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum ToolCallStatus {
+  PENDING_APPROVAL
+  APPROVED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  DENIED // blocked by permissions or rejected by a human
+}
+
+enum DeliverableFormat {
+  MARKDOWN
+  CSV
+  JSON
+}
+
+enum DeliverableStatus {
+  PENDING_REVIEW
+  ACCEPTED
+  REJECTED
+}
+
+enum EvaluationType {
+  DETERMINISTIC
+  LLM_JUDGE
+  USER_FEEDBACK
+}
+
+enum ReviewRecommendation {
+  KEEP
+  IMPROVE
+  REPLACE
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum MessageRole {
+  USER
+  WORKER
+  SYSTEM
+}
+
+enum MessageClassification {
+  QUESTION
+  TEMPORARY_INSTRUCTION
+  SPEC_CHANGE
+}
+
+enum ActorType {
+  WORKER
+  USER
+  SYSTEM
+}
+
+enum ActivityType {
+  JOB_CREATED
+  JOB_SPEC_APPROVED
+  WORKER_HIRED
+  WORKER_PAUSED
+  WORKER_RESUMED
+  WORKER_RETIRED
+  WORKER_REPLACED
+  VERSION_PROPOSED
+  VERSION_REJECTED
+  RUN_QUEUED
+  RUN_STARTED
+  RUN_SUCCEEDED
+  RUN_FAILED
+  RUN_CANCELLED
+  TOOL_USED
+  APPROVAL_REQUESTED
+  APPROVAL_APPROVED
+  APPROVAL_REJECTED
+  DELIVERABLE_CREATED
+  DELIVERABLE_ACCEPTED
+  DELIVERABLE_REJECTED
+  EVALUATION_COMPLETED
+  REVIEW_GENERATED
+  INSTRUCTION_RECEIVED
+  PERMISSION_CHANGED
+  NOTE
+}
+
+enum UsageKind {
+  MODEL
+  TOOL
+}
+
+// ───────────────────────────── Tenancy ─────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users          User[]
+  jobs           Job[]
+  workers        Worker[]
+  runs           Run[]
+  deliverables   Deliverable[]
+  evaluations    Evaluation[]
+  reviews        WorkerReview[]
+  approvals      Approval[]
+  messages       WorkerMessage[]
+  activityEvents ActivityEvent[]
+  usageRecords   UsageRecord[]
+  credentials    Credential[]
+  modelCalls     ModelCall[]
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String   @unique
+  name           String
+  passwordHash   String
+  role           UserRole @default(MEMBER)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ───────────────────────────── Jobs ─────────────────────────────
+
+model Job {
+  id             String    @id @default(cuid())
+  organizationId String
+  title          String
+  /// Raw plain-English description the customer typed at intake.
+  description    String
+  /// Job family slug, e.g. "market_research" (see src/server/domain/job-family.ts).
+  jobFamily      String    @default("general")
+  status         JobStatus @default(DRAFT)
+  /// Follow-up Q&A captured during scoping: IntakeAnswers (see domain/job-spec.ts).
+  intake         Json?
+  /// Staffing Engine proposal awaiting "Hire": WorkerProposal (see domain/blueprint.ts). Cleared on hire.
+  pendingProposal Json?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  specs        JobSpec[]
+  workers      Worker[]
+  runs         Run[]
+  deliverables Deliverable[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+}
+
+model JobSpec {
+  id         String        @id @default(cuid())
+  jobId      String
+  version    Int
+  status     JobSpecStatus @default(DRAFT)
+  /// Zod-validated JobSpec (see domain/job-spec.ts).
+  spec       Json
+  approvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  job            Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  workerVersions WorkerVersion[]
+
+  @@unique([jobId, version])
+}
+
+// ───────────────────────────── Workers ─────────────────────────────
+
+model Worker {
+  id             String       @id @default(cuid())
+  organizationId String
+  jobId          String
+  /// Persona first name, e.g. "Alex".
+  name           String
+  /// Role title, e.g. "AI Market Researcher".
+  title          String
+  /// Tailwind-safe color token used for the avatar (e.g. "violet").
+  avatarColor    String       @default("violet")
+  status         WorkerStatus @default(ACTIVE)
+  health         WorkerHealth @default(UNKNOWN)
+  /// Human-readable reason shown when health = NEEDS_ATTENTION.
+  healthReason   String?
+  /// Cached weighted score 0..100 (see evaluation/score.ts). Null until evaluated.
+  score          Float?
+  scoreUpdatedAt DateTime?
+
+  scheduleKind ScheduleKind @default(MANUAL)
+  /// Hour of day (0-23, SERVER LOCAL TIME — see domain/schedule.ts) for DAILY/WEEKLY schedules.
+  scheduleHour Int?
+  /// Day of week (0=Sun..6=Sat) for WEEKLY schedules.
+  scheduleDow  Int?
+  nextRunAt    DateTime?
+  lastRunAt    DateTime?
+
+  currentVersionId String?   @unique
+  hiredAt          DateTime  @default(now())
+  retiredAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  job            Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  currentVersion WorkerVersion?    @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  versions       WorkerVersion[]   @relation("WorkerVersions")
+  toolGrants     WorkerToolGrant[]
+  runs           Run[]
+  deliverables   Deliverable[]
+  evaluations    Evaluation[]
+  reviews        WorkerReview[]
+  approvals      Approval[]
+  messages       WorkerMessage[]
+  activityEvents ActivityEvent[]
+
+  @@index([organizationId, status])
+  @@index([jobId])
+  @@index([status, nextRunAt])
+}
+
+model WorkerVersion {
+  id              String              @id @default(cuid())
+  workerId        String
+  jobSpecId       String
+  version         Int
+  status          WorkerVersionStatus @default(PROPOSED)
+  /// Zod-validated WorkerBlueprint (see domain/blueprint.ts). IMMUTABLE once lockedAt is set.
+  blueprint       Json
+  changeReason    VersionChangeReason @default(INITIAL_HIRE)
+  changeSummary   String?
+  /// ReplacementAnalysis (see domain/replacement.ts) when changeReason = REPLACEMENT / SPEC_CHANGE.
+  analysis        Json?
+  parentVersionId String?
+  /// Set when the first Run is created against this version. After that the row's blueprint never changes.
+  lockedAt        DateTime?
+  activatedAt     DateTime?
+  retiredAt       DateTime?
+  createdById     String?
+  createdAt       DateTime            @default(now())
+
+  worker        Worker          @relation("WorkerVersions", fields: [workerId], references: [id], onDelete: Cascade)
+  currentFor    Worker?         @relation("CurrentVersion")
+  jobSpec       JobSpec         @relation(fields: [jobSpecId], references: [id], onDelete: Cascade)
+  parentVersion WorkerVersion?  @relation("VersionLineage", fields: [parentVersionId], references: [id])
+  childVersions WorkerVersion[] @relation("VersionLineage")
+  runs          Run[]
+  deliverables  Deliverable[]
+  evaluations   Evaluation[]
+  reviews       WorkerReview[]
+
+  @@unique([workerId, version])
+  @@index([workerId, status])
+}
+
+/// Server-side permission grant. A tool call is allowed only if the tool is listed in the version
+/// blueprint AND a non-revoked grant exists for (workerId, toolName).
+model WorkerToolGrant {
+  id               String    @id @default(cuid())
+  workerId         String
+  toolName         String
+  requiresApproval Boolean   @default(false)
+  /// Optional constraints, e.g. { "maxCallsPerRun": 20 }.
+  config           Json?
+  grantedById      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  revokedAt        DateTime?
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, toolName])
+}
+
+// ───────────────────────────── Execution ─────────────────────────────
+
+model Run {
+  id              String     @id @default(cuid())
+  organizationId  String
+  jobId           String
+  workerId        String
+  workerVersionId String
+  status          RunStatus  @default(QUEUED)
+  trigger         RunTrigger @default(MANUAL)
+  /// RunInput (see runtime/types.ts): temporary instructions, params.
+  input           Json?
+  /// RunOutput summary (see runtime/types.ts).
+  output          Json?
+  /// RunCheckpoint (see runtime/types.ts) — durable executor state used to resume after approval/restart.
+  checkpoint      Json?
+  error           String?
+  attempt         Int        @default(1)
+  maxAttempts     Int        @default(2)
+  simulated       Boolean    @default(false)
+
+  // Durable queue fields
+  availableAt DateTime  @default(now())
+  lockedAt    DateTime?
+  lockedBy    String?
+  heartbeatAt DateTime?
+
+  // Rollups. costUsd/inputTokens/outputTokens are written ONLY by usage.recordUsage (atomic increments).
+  // durationMs = accumulated ACTIVE executing time (excludes approval waits / retry backoff).
+  costUsd      Decimal @default(0) @db.Decimal(12, 6)
+  inputTokens  Int     @default(0)
+  outputTokens Int     @default(0)
+  durationMs   Int?
+
+  requestedById String?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  job           Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker        Worker        @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  workerVersion WorkerVersion @relation(fields: [workerVersionId], references: [id], onDelete: Cascade)
+  steps         RunStep[]
+  modelCalls    ModelCall[]
+  toolCalls     ToolCall[]
+  deliverables  Deliverable[]
+  evaluations   Evaluation[]
+  approvals     Approval[]
+
+  @@index([status, availableAt])
+  @@index([organizationId, createdAt])
+  @@index([workerId, createdAt])
+  @@index([workerVersionId])
+}
+
+model RunStep {
+  id          String        @id @default(cuid())
+  runId       String
+  index       Int
+  /// Run.attempt this step was written under. `index` stays monotonic across attempts.
+  attempt     Int           @default(1)
+  /// Blueprint component id this step belongs to (null for system steps).
+  componentId String?
+  kind        RunStepKind
+  status      RunStepStatus @default(RUNNING)
+  /// Humanized, contractor-style description: "Searched the web for 'AI infra funding'".
+  title       String
+  detail      String?
+  input       Json?
+  output      Json?
+  error       String?
+  startedAt   DateTime      @default(now())
+  finishedAt  DateTime?
+  durationMs  Int?
+
+  run        Run         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelCalls ModelCall[]
+  toolCalls  ToolCall[]
+
+  @@unique([runId, index])
+}
+
+model ModelCall {
+  id             String   @id @default(cuid())
+  organizationId String
+  workerId       String?
+  jobId          String?
+  runId          String?
+  runStepId      String?
+  /// What the call was for: "agent.turn", "scoping.spec", "evaluation.judge", ...
+  purpose        String
+  provider       String
+  model          String
+  tier           String
+  inputTokens    Int      @default(0)
+  outputTokens   Int      @default(0)
+  costUsd        Decimal  @default(0) @db.Decimal(12, 6)
+  latencyMs      Int      @default(0)
+  simulated      Boolean  @default(false)
+  /// Truncated request/response for the debug trace.
+  request        Json?
+  response       Json?
+  error          String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  run          Run?         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runStep      RunStep?     @relation(fields: [runStepId], references: [id], onDelete: SetNull)
+
+  @@index([runId])
+  @@index([organizationId, createdAt])
+  @@index([workerId, createdAt])
+}
+
+model ToolCall {
+  id         String         @id @default(cuid())
+  runId      String
+  runStepId  String?
+  workerId   String
+  toolName   String
+  /// Run.attempt this call was made under (per-run call limits count the current attempt only).
+  attempt    Int            @default(1)
+  /// Provider-issued tool call id from the model turn (used to resume the agent loop).
+  callId     String?
+  input      Json
+  output     Json?
+  status     ToolCallStatus @default(RUNNING)
+  error      String?
+  latencyMs  Int?
+  costUsd    Decimal        @default(0) @db.Decimal(12, 6)
+  simulated  Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+  finishedAt DateTime?
+
+  run      Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runStep  RunStep?  @relation(fields: [runStepId], references: [id], onDelete: SetNull)
+  approval Approval?
+
+  @@index([runId])
+  @@index([workerId, toolName])
+}
+
+// ───────────────────────────── Outputs & quality ─────────────────────────────
+
+model Deliverable {
+  id              String            @id @default(cuid())
+  organizationId  String
+  jobId           String
+  workerId        String
+  workerVersionId String
+  runId           String
+  title           String
+  summary         String?
+  format          DeliverableFormat @default(MARKDOWN)
+  /// Rendered content: markdown text, CSV text, or JSON string.
+  content         String
+  /// Structured rows/records backing the deliverable (for tables + deterministic evaluation).
+  data            Json?
+  status          DeliverableStatus @default(PENDING_REVIEW)
+  feedback        String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  createdAt       DateTime          @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  job           Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker        Worker        @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  workerVersion WorkerVersion @relation(fields: [workerVersionId], references: [id], onDelete: Cascade)
+  run           Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  evaluations   Evaluation[]
+
+  @@index([organizationId, createdAt])
+  @@index([workerId, createdAt])
+  @@index([jobId, createdAt])
+  @@index([runId])
+}
+
+model Evaluation {
+  id              String         @id @default(cuid())
+  organizationId  String
+  workerId        String
+  workerVersionId String
+  runId           String?
+  deliverableId   String?
+  type            EvaluationType
+  /// Normalized 0..1.
+  score           Float
+  passed          Boolean
+  summary         String?
+  /// EvaluationDetails (see domain/evaluation.ts): checks[], rubric scores, judge reasoning, feedback.
+  details         Json?
+  createdById     String?
+  createdAt       DateTime       @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  worker        Worker        @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  workerVersion WorkerVersion @relation(fields: [workerVersionId], references: [id], onDelete: Cascade)
+  run           Run?          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  deliverable   Deliverable?  @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+
+  /// One evaluation of each type per deliverable → evaluateRun / feedback are idempotent upserts.
+  @@unique([deliverableId, type])
+  @@index([workerId, createdAt])
+  @@index([workerVersionId, type])
+  @@index([runId])
+}
+
+model WorkerReview {
+  id                   String               @id @default(cuid())
+  organizationId       String
+  workerId             String
+  workerVersionId      String
+  periodStart          DateTime
+  periodEnd            DateTime
+  /// 0..100
+  overallScore         Float
+  summary              String
+  strengths            Json
+  problems             Json
+  recommendation       ReviewRecommendation
+  recommendationDetail String
+  /// ReviewMetrics (see domain/evaluation.ts).
+  metrics              Json
+  requestedById        String?
+  createdAt            DateTime             @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  worker        Worker        @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  workerVersion WorkerVersion @relation(fields: [workerVersionId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, createdAt])
+}
+
+model Approval {
+  id             String         @id @default(cuid())
+  organizationId String
+  runId          String
+  workerId       String
+  toolCallId     String         @unique
+  toolName       String
+  /// "Maya wants to send the weekly report to 3 stakeholders"
+  title          String
+  description    String?
+  /// Preview of the exact action input the human is approving.
+  payload        Json
+  status         ApprovalStatus @default(PENDING)
+  decidedById    String?
+  decidedAt      DateTime?
+  decisionNote   String?
+  createdAt      DateTime       @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  run          Run          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  worker       Worker       @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  toolCall     ToolCall     @relation(fields: [toolCallId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([workerId, status])
+  @@index([runId])
+}
+
+// ───────────────────────────── Communication & audit ─────────────────────────────
+
+model WorkerMessage {
+  id                String                 @id @default(cuid())
+  organizationId    String
+  workerId          String
+  role              MessageRole
+  content           String
+  classification    MessageClassification?
+  /// For TEMPORARY_INSTRUCTION: true until consumed by a run.
+  instructionActive Boolean                @default(false)
+  appliedToRunId    String?
+  /// For SPEC_CHANGE: the PROPOSED WorkerVersion created from this message.
+  proposedVersionId String?
+  userId            String?
+  metadata          Json?
+  createdAt         DateTime               @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  worker       Worker       @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, createdAt])
+  @@index([workerId, classification, instructionActive])
+}
+
+model ActivityEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  workerId       String?
+  jobId          String?
+  runId          String?
+  type           ActivityType
+  actorType      ActorType    @default(SYSTEM)
+  /// Denormalized actor display name ("Alex", "Karan", "System") so history survives renames.
+  actorName      String?
+  /// Humanized headline: "Alex delivered 'AI Infra Funding Report — Week 37'".
+  title          String
+  detail         String?
+  metadata       Json?
+  createdAt      DateTime     @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  worker       Worker?      @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([workerId, createdAt])
+  @@index([jobId, createdAt])
+}
+
+/// Metering ledger. One row per billable model/tool call. Powers the Usage pages now and
+/// Stripe metered billing in Phase 2.
+model UsageRecord {
+  id             String    @id @default(cuid())
+  organizationId String
+  workerId       String?
+  jobId          String?
+  runId          String?
+  kind           UsageKind
+  /// Model provider ("anthropic") or "tool".
+  provider       String
+  /// Model id or tool name.
+  resource       String
+  inputTokens    Int       @default(0)
+  outputTokens   Int       @default(0)
+  /// Our cost (COGS).
+  costUsd        Decimal   @default(0) @db.Decimal(12, 6)
+  /// What we would bill the customer (cost × margin multiplier).
+  billableUsd    Decimal   @default(0) @db.Decimal(12, 6)
+  simulated      Boolean   @default(false)
+  occurredAt     DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, occurredAt])
+  @@index([workerId, occurredAt])
+  @@index([runId])
+}
+
+/// Encrypted third-party secrets (AES-256-GCM, key from CREDENTIAL_ENCRYPTION_KEY).
+model Credential {
+  id             String    @id @default(cuid())
+  organizationId String
+  /// Secret name, e.g. "TAVILY_API_KEY". Resolved by tools via resolveSecret(orgId, name) from @/server/secrets.
+  name           String
+  label          String?
+  encryptedValue String
+  last4          String
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, name])
+}

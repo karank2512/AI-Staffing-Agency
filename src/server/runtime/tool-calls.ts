@@ -1,0 +1,189 @@
+import type { RunStepStatus, ToolCallStatus } from "@prisma/client";
+import { recordActivity } from "@/server/activity";
+import { db, toJson } from "@/server/db";
+import type { AgentComponent } from "@/server/domain/blueprint";
+import type { ChatMessage, ToolCallRequest } from "@/server/models/types";
+import { tools } from "@/server/tools";
+import type { InvokeToolResult } from "@/server/tools/types";
+import { DECLINED_MESSAGE } from "./approvals";
+import { compact } from "./compact";
+import { pauseForApproval, type ApprovalRequest } from "./pause";
+import type { RunSlice } from "./slice";
+import type { StepHandle } from "./steps";
+import type { AgentCheckpoint, PendingToolCall } from "./types";
+
+/**
+ * Tool-call batches for one assistant turn. Rows first, execution second, and every outcome is written to the
+ * ToolCall row before the next call starts — that is what makes a resumed batch idempotent: a call that already
+ * has an outcome is replayed from the row, never executed twice.
+ */
+
+export type BatchResult = { paused: false } | { paused: true; approvalIds: string[] };
+
+const UNKNOWN_OUTCOME = "The outcome of this call is unknown: the executor restarted while it was running";
+
+function toolMessage(call: PendingToolCall, output: unknown, isError = false): ChatMessage {
+  return { role: "tool", toolCallId: call.callId, toolName: call.toolName, output, ...(isError ? { isError: true } : {}) };
+}
+
+function errorMessage(call: PendingToolCall, error: string): ChatMessage {
+  return toolMessage(call, { error }, true);
+}
+
+/** Contract mapping: ok→SUCCEEDED · error/invalid_input→FAILED · denied/rejected→DENIED · approval_required→PENDING_APPROVAL. */
+function statusFor(result: InvokeToolResult): ToolCallStatus {
+  switch (result.status) {
+    case "ok":
+      return "SUCCEEDED";
+    case "error":
+    case "invalid_input":
+      return "FAILED";
+    case "denied":
+    case "rejected":
+      return "DENIED";
+    case "approval_required":
+      return "PENDING_APPROVAL";
+  }
+}
+
+interface RowState {
+  status: ToolCallStatus;
+  output: unknown;
+  error: string | null;
+  step: StepHandle | null;
+  /** The TOOL_CALL step still needs a final status (a replayed outcome must not rewrite a finished step). */
+  stepOpen: boolean;
+}
+
+const OPEN_STEP_STATUSES: ReadonlySet<RunStepStatus> = new Set<RunStepStatus>(["PENDING", "RUNNING", "WAITING"]);
+
+async function readRow(call: PendingToolCall): Promise<RowState | null> {
+  const row = await db.toolCall.findUnique({
+    where: { id: call.toolCallId },
+    select: { status: true, output: true, error: true, runStep: { select: { id: true, index: true, startedAt: true, status: true } } },
+  });
+  if (!row) return null;
+  const step = row.runStep ? { id: row.runStep.id, index: row.runStep.index, startedAt: row.runStep.startedAt } : null;
+  return { status: row.status, output: row.output, error: row.error, step, stepOpen: !!row.runStep && OPEN_STEP_STATUSES.has(row.runStep.status) };
+}
+
+/** New calls from a model turn: unknown tools get an error message, the rest get RunStep + ToolCall rows. */
+export async function startToolBatch(slice: RunSlice, component: AgentComponent, agent: AgentCheckpoint, calls: ToolCallRequest[]): Promise<BatchResult> {
+  const granted = new Set(component.tools);
+  const allowed: ToolCallRequest[] = [];
+  for (const call of calls) {
+    if (granted.has(call.name)) allowed.push(call);
+    else agent.messages.push({ role: "tool", toolCallId: call.id, toolName: call.name, output: { error: `The tool "${call.name}" is not available to you in this role` }, isError: true });
+  }
+
+  if (allowed.length > 0) await slice.enforceLimits({ pendingToolCalls: allowed.length });
+  for (const call of allowed) {
+    const step = await slice.steps.begin({ kind: "TOOL_CALL", componentId: component.id, title: tools.describe(call.name, call.input).title, input: call.input });
+    const row = await db.toolCall.create({
+      data: {
+        runId: slice.run.id,
+        runStepId: step.id,
+        workerId: slice.run.workerId,
+        toolName: call.name,
+        attempt: slice.run.attempt,
+        callId: call.id,
+        input: toJson(call.input),
+        status: "RUNNING",
+        simulated: slice.run.simulated,
+      },
+      select: { id: true },
+    });
+    agent.pendingToolCalls.push({ toolCallId: row.id, callId: call.id, toolName: call.name, input: call.input });
+  }
+  return resolvePending(slice, component, agent, { resumed: false });
+}
+
+/**
+ * Drain `agent.pendingToolCalls` in order. On resume, rows that already carry an outcome are replayed; a call
+ * that was RUNNING when the executor died is re-run only when it has no external side effect.
+ */
+export async function resolvePending(slice: RunSlice, component: AgentComponent, agent: AgentCheckpoint, opts: { resumed: boolean }): Promise<BatchResult> {
+  const stillPending: PendingToolCall[] = [];
+  const approvals: ApprovalRequest[] = [];
+
+  for (const call of agent.pendingToolCalls) {
+    const row = await readRow(call);
+    if (!row) {
+      agent.messages.push(errorMessage(call, "The record of this tool call is missing"));
+      continue;
+    }
+    const step = row.step;
+
+    if (opts.resumed) {
+      if (row.status === "SUCCEEDED") {
+        agent.messages.push(toolMessage(call, row.output));
+        continue;
+      }
+      if (row.status === "FAILED" || row.status === "DENIED") {
+        const error = row.error ?? (row.status === "DENIED" ? DECLINED_MESSAGE : "The tool call failed");
+        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error });
+        agent.messages.push(errorMessage(call, error));
+        continue;
+      }
+      if (row.status === "RUNNING" && tools.get(call.toolName)?.sideEffect === "external_write") {
+        await db.toolCall.update({ where: { id: call.toolCallId }, data: { status: "FAILED", error: UNKNOWN_OUTCOME, finishedAt: new Date() } });
+        if (step && row.stepOpen) await slice.steps.finish(step, { status: "FAILED", error: UNKNOWN_OUTCOME });
+        agent.messages.push(errorMessage(call, "outcome unknown after restart"));
+        continue;
+      }
+      // APPROVED, PENDING_APPROVAL or a re-runnable RUNNING call: execute it now.
+      await db.toolCall.update({ where: { id: call.toolCallId }, data: { status: "RUNNING" } });
+      if (step) await db.runStep.update({ where: { id: step.id }, data: { status: "RUNNING", detail: null } });
+    }
+
+    const result = await tools.invoke({ toolName: call.toolName, input: call.input, ctx: slice.toolContext(), toolCallId: call.toolCallId });
+    const status = statusFor(result);
+    const now = new Date();
+
+    if (result.status === "approval_required") {
+      await db.toolCall.update({ where: { id: call.toolCallId }, data: { status } });
+      if (step) await db.runStep.update({ where: { id: step.id }, data: { status: "PENDING", detail: "Waiting for approval" } });
+      stillPending.push(call);
+      approvals.push({ call, approval: tools.describe(call.toolName, call.input).approval });
+      continue;
+    }
+
+    if (result.status === "ok") {
+      slice.cp.counters.toolCalls += 1;
+      slice.cp.counters.costUsd += result.costUsd;
+      await db.toolCall.update({
+        where: { id: call.toolCallId },
+        data: { status, output: toJson(result.output), latencyMs: Math.round(result.latencyMs), costUsd: result.costUsd, simulated: result.simulated, finishedAt: now },
+      });
+      if (step) await slice.steps.finish(step, { status: "SUCCEEDED", output: compact(result.output), detail: result.simulated ? "Simulated" : undefined });
+      agent.messages.push(toolMessage(call, result.output));
+      if (tools.get(call.toolName)?.sideEffect === "external_write") {
+        await recordActivity({
+          organizationId: slice.run.organizationId,
+          type: "TOOL_USED",
+          title: `${slice.workerName}: ${tools.describe(call.toolName, call.input).title}`,
+          workerId: slice.run.workerId,
+          jobId: slice.run.jobId,
+          runId: slice.run.id,
+          actorType: "WORKER",
+          actorName: slice.workerName,
+          metadata: { toolName: call.toolName },
+        });
+      }
+      continue;
+    }
+
+    const message = result.message;
+    await db.toolCall.update({
+      where: { id: call.toolCallId },
+      data: { status, error: message, finishedAt: now, ...(result.status === "error" ? { latencyMs: Math.round(result.latencyMs) } : {}) },
+    });
+    if (step) await slice.steps.finish(step, { status: "FAILED", error: message });
+    agent.messages.push(errorMessage(call, message));
+  }
+
+  agent.pendingToolCalls = stillPending;
+  if (stillPending.length === 0) return { paused: false };
+  const approvalIds = await pauseForApproval(slice, component, agent, approvals);
+  return { paused: true, approvalIds };
+}
