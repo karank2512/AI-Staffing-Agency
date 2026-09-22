@@ -28,10 +28,25 @@ export interface RunTimelineProps {
   details: Record<string, RunStepDetailView>;
 }
 
-function elapsed(step: LiveStep): string | null {
+/**
+ * Wall-clock "now" that is null during SSR and hydration, then ticks every second — reading the clock
+ * during render would make the server and client disagree on a live duration (hydration mismatch).
+ */
+function useNow(active: boolean): number | null {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+function elapsed(step: LiveStep, now: number | null): string | null {
   if (step.durationMs !== null) return formatDuration(step.durationMs);
-  if (step.status === "RUNNING" || step.status === "WAITING") {
-    const ms = Date.now() - new Date(step.startedAt).getTime();
+  if ((step.status === "RUNNING" || step.status === "WAITING") && now !== null) {
+    const ms = now - new Date(step.startedAt).getTime();
     return ms > 0 ? formatDuration(ms) : null;
   }
   return null;
@@ -45,7 +60,8 @@ function StepRow({ step, detail, runId, runStatus, workerId, workerName }: { ste
   const expandable = hasDetails(detail);
   const [open, setOpen] = useState(needsDecision || step.kind === "ERROR" || step.status === "FAILED");
   const Icon = kind.icon;
-  const time = elapsed(step);
+  const now = useNow(step.durationMs === null && (step.status === "RUNNING" || step.status === "WAITING"));
+  const time = elapsed(step, now);
 
   return (
     <li className={cn("relative flex gap-3 py-3", needsDecision && "-mx-4 rounded-lg bg-amber-50/70 px-4 ring-1 ring-amber-200 ring-inset")}>

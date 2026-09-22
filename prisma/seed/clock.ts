@@ -1,3 +1,5 @@
+import { computeNextRunAt, type Cadence } from "@/server/domain";
+
 /**
  * Deterministic time for the demo seed. Every date is an offset from "now" so the workforce always looks like it
  * has been working for the last three weeks, whenever the seed runs. `Timeline` hands out monotonic timestamps
@@ -67,4 +69,27 @@ export class Timeline {
   wait(ms: number): void {
     this.cursor = new Date(this.cursor.getTime() + Math.max(0, Math.round(ms)));
   }
+}
+
+/** Scheduled fire times strictly after `from` and strictly before `to`, oldest first (server local time). */
+export function occurrencesBetween(cadence: Cadence, from: Date, to: Date): Date[] {
+  const out: Date[] = [];
+  let next = computeNextRunAt(cadence, from);
+  while (next && next.getTime() < to.getTime() && out.length < 500) {
+    out.push(next);
+    next = computeNextRunAt(cadence, next);
+  }
+  return out;
+}
+
+/** The last `count` fire times before `before` (oldest first). */
+export function lastOccurrences(cadence: Cadence, before: Date, count: number, lookbackDays = 60): Date[] {
+  return occurrencesBetween(cadence, new Date(before.getTime() - lookbackDays * DAY_MS), before).slice(-count);
+}
+
+/** Same calendar day as `date`, at a local hour:minute. */
+export function atTime(date: Date, hour: number, minute = 0): Date {
+  const d = new Date(date);
+  d.setHours(hour, minute, 0, 0);
+  return d;
 }

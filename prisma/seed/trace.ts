@@ -1,12 +1,11 @@
-import type { ActivityType, ActorType, PrismaClient, RunStepKind, RunStepStatus, RunTrigger } from "@prisma/client";
+import type { ActivityType, ActorType, PrismaClient, RunStepKind, RunStepStatus } from "@prisma/client";
 import { toJson } from "@/server/db";
 import { toDbDeliverableFormat, type JobSpec, type WorkerBlueprint } from "@/server/domain";
 import { llm } from "@/server/models";
-import type { ChatMessage, ToolCallRequest } from "@/server/models/types";
 import { buildRequestTrace, buildResponseTrace } from "@/server/models/persist";
+import type { ToolCallRequest } from "@/server/models/types";
 import { compact, oneLine } from "@/server/runtime/compact";
 import { narrativeSummary, renderTitle } from "@/server/runtime/deliverable";
-import type { RunCheckpoint } from "@/server/runtime/types";
 import { tools } from "@/server/tools";
 import { recordUsage } from "@/server/usage";
 import { seededBetween, Timeline } from "./clock";
@@ -14,9 +13,9 @@ import type { EmulatedTurn } from "./emulate";
 
 /**
  * Writes run history the way the executor would have: RunStep rows with monotonic indexes, ModelCall / ToolCall
- * rows pointing at their steps, usage through `recordUsage` (so Run.costUsd/tokens are true rollups), activity
- * with the runtime's own wording and metadata keys. Timestamps come from a Timeline so a run that "took" 90 s
- * of active work is spread over 90 s of steps.
+ * rows pointing at their steps, usage through the real `recordUsage` (so Run.costUsd/tokens are true rollups),
+ * activity with the runtime's own wording and metadata keys. Timestamps come from a Timeline so a run that "took"
+ * 90 s of active work is spread over 90 s of steps; approval waits and retry backoff pass without counting.
  */
 
 export interface Seat {
@@ -38,7 +37,21 @@ export interface StepHandle {
   startedAt: Date;
 }
 
-const MODEL_LATENCY: Record<string, [number, number]> = { fast: [2_800, 7_500], standard: [6_000, 16_000], reasoning: [11_000, 24_000] };
+export interface StepRow {
+  kind: RunStepKind;
+  title: string;
+  componentId?: string;
+  status: RunStepStatus;
+  input?: unknown;
+  output?: unknown;
+  detail?: string;
+  error?: string;
+  startedAt: Date;
+  /** null = still open (PENDING / WAITING). */
+  finishedAt: Date | null;
+}
+
+const MODEL_LATENCY: Record<string, [number, number]> = { fast: [3_200, 8_000], standard: [7_500, 17_000], reasoning: [12_000, 26_000] };
 const TOOL_LATENCY: Record<string, [number, number]> = {
   web_search: [900, 2_300],
   fetch_url: [600, 1_900],
@@ -48,26 +61,17 @@ const TOOL_LATENCY: Record<string, [number, number]> = {
   calculator: [5, 20],
 };
 
-export const QUEUE_TITLES: Record<RunTrigger, (name: string) => string> = {
-  MANUAL: (name) => `${name} was asked to run now`,
-  SCHEDULED: (name) => `${name}’s scheduled run was queued`,
-  RETRY: (name) => `${name} was asked to try again`,
-  CHAT: (name) => `${name} was asked to run from a chat message`,
-  HIRE: (name) => `${name}’s first run was queued`,
-};
-
 export class RunWriter {
   private nextIndex = 0;
   readonly timeline: Timeline;
   counters = { modelCalls: 0, toolCalls: 0, costUsd: 0 };
 
   constructor(
-    private readonly db: PrismaClient,
+    readonly db: PrismaClient,
     readonly seat: Seat,
     readonly runId: string,
-    readonly attempt: number,
+    public attempt: number,
     startedAt: Date,
-    private readonly simulated = true,
   ) {
     this.timeline = new Timeline(startedAt);
   }
@@ -76,49 +80,51 @@ export class RunWriter {
     return this.nextIndex;
   }
 
-  private latency(kind: string, key: string): number {
+  latency(kind: string, key: string): number {
     const range = MODEL_LATENCY[kind] ?? TOOL_LATENCY[kind] ?? [200, 800];
     return seededBetween(`${this.runId}:${key}:${this.nextIndex}`, range[0], range[1]);
   }
 
-  /** One RunStep with explicit timing; `open` leaves it unfinished (WAITING / PENDING). */
-  async step(args: {
-    kind: RunStepKind;
-    title: string;
-    componentId?: string;
-    status?: RunStepStatus;
-    input?: unknown;
-    output?: unknown;
-    detail?: string;
-    error?: string;
-    durationMs: number;
-    open?: boolean;
-    startedAt?: Date;
-  }): Promise<StepHandle> {
+  /** Insert one RunStep with explicit timing, taking the next monotonic index. */
+  async writeStep(row: StepRow): Promise<StepHandle> {
     const index = this.nextIndex++;
-    const startedAt = args.startedAt ?? this.timeline.now;
-    const interval = args.open ? null : this.timeline.next(args.durationMs);
-    const finishedAt = interval ? interval.finishedAt : null;
-    const row = await this.db.runStep.create({
+    const created = await this.db.runStep.create({
       data: {
         runId: this.runId,
         index,
         attempt: this.attempt,
-        componentId: args.componentId ?? null,
-        kind: args.kind,
-        status: args.status ?? "SUCCEEDED",
-        title: oneLine(args.title),
-        detail: args.detail ?? null,
-        input: args.input === undefined ? undefined : toJson(compact(args.input)),
-        output: args.output === undefined ? undefined : toJson(compact(args.output)),
-        error: args.error ?? null,
-        startedAt,
-        finishedAt,
-        durationMs: finishedAt ? Math.max(0, finishedAt.getTime() - startedAt.getTime()) : null,
+        componentId: row.componentId ?? null,
+        kind: row.kind,
+        status: row.status,
+        title: oneLine(row.title),
+        detail: row.detail ?? null,
+        input: row.input === undefined ? undefined : toJson(compact(row.input)),
+        output: row.output === undefined ? undefined : toJson(compact(row.output)),
+        error: row.error ?? null,
+        startedAt: row.startedAt,
+        finishedAt: row.finishedAt,
+        durationMs: row.finishedAt ? Math.max(0, row.finishedAt.getTime() - row.startedAt.getTime()) : null,
       },
       select: { id: true },
     });
-    return { id: row.id, index, startedAt };
+    return { id: created.id, index, startedAt: row.startedAt };
+  }
+
+  /** A step that takes `durationMs` of active time on the run's timeline. */
+  async step(args: Omit<StepRow, "startedAt" | "finishedAt" | "status"> & { status?: RunStepStatus; durationMs: number }): Promise<StepHandle> {
+    const interval = this.timeline.next(args.durationMs);
+    return this.writeStep({
+      kind: args.kind,
+      title: args.title,
+      componentId: args.componentId,
+      status: args.status ?? "SUCCEEDED",
+      input: args.input,
+      output: args.output,
+      detail: args.detail,
+      error: args.error,
+      startedAt: interval.startedAt,
+      finishedAt: interval.finishedAt,
+    });
   }
 
   /** MODEL_CALL step + ModelCall row + MODEL usage, exactly as the agent loop records one turn. */
@@ -127,16 +133,16 @@ export class RunWriter {
     const tier = args.tier as "fast" | "standard" | "reasoning";
     const route = llm.route(tier);
     const costUsd = llm.estimateCostUsd(tier, result.usage.inputTokens, result.usage.outputTokens);
-    const latencyMs = this.latency(tier, `model:${args.turn}`);
+    const latencyMs = this.latency(tier, `model:${args.componentId}:${args.turn}`);
     const tokens = result.usage.inputTokens + result.usage.outputTokens;
     const step = await this.step({
       kind: "MODEL_CALL",
       componentId: args.componentId,
       title: `${this.seat.workerName} is thinking (${args.componentName}, turn ${args.turn})`,
       input: { turn: args.turn, tier, tools: args.toolNames, messages: result.request.length },
-      detail: `${route.model} · ${tokens} tokens${this.simulated ? " · Simulated" : ""}`,
+      detail: `${route.model} · ${tokens} tokens · Simulated`,
       output: { text: result.text, toolCalls: result.toolCalls, finishReason: result.finishReason, usage: result.usage, costUsd },
-      durationMs: latencyMs + seededBetween(`${this.runId}:overhead:${args.turn}`, 40, 180),
+      durationMs: latencyMs + seededBetween(`${this.runId}:overhead:${args.componentId}:${args.turn}`, 40, 180),
     });
     const finishedAt = this.timeline.now;
     await this.db.modelCall.create({
@@ -154,7 +160,7 @@ export class RunWriter {
         outputTokens: result.usage.outputTokens,
         costUsd,
         latencyMs,
-        simulated: this.simulated,
+        simulated: true,
         request: toJson(buildRequestTrace({ system: args.system, messages: result.request, tools: args.toolNames })),
         response: toJson(buildResponseTrace({ text: result.text, toolCalls: result.toolCalls, finishReason: result.finishReason })),
         createdAt: finishedAt,
@@ -166,11 +172,10 @@ export class RunWriter {
     return step;
   }
 
-  /** TOOL_CALL step + ToolCall row for a call that ran to completion, plus its TOOL usage. */
-  async toolCall(args: { componentId: string; call: ToolCallRequest; output: unknown; error?: string; callId?: string; startedAt?: Date; extraWaitMs?: number }): Promise<{ step: StepHandle; toolCallId: string }> {
+  /** TOOL_CALL step + ToolCall row for a call that ran to completion (or failed), plus its TOOL usage. */
+  async toolCall(args: { componentId: string; call: ToolCallRequest; output: unknown; error?: string }): Promise<{ step: StepHandle; toolCallId: string }> {
     const { call } = args;
-    const definition = tools.get(call.name);
-    const costUsd = definition?.costPerCallUsd ?? 0;
+    const costUsd = tools.get(call.name)?.costPerCallUsd ?? 0;
     const latencyMs = this.latency(call.name, `tool:${call.id}`);
     const failed = args.error !== undefined;
     const step = await this.step({
@@ -181,9 +186,8 @@ export class RunWriter {
       input: call.input,
       output: failed ? undefined : args.output,
       error: args.error,
-      detail: failed ? undefined : this.simulated ? "Simulated" : undefined,
-      durationMs: latencyMs + (args.extraWaitMs ?? 0),
-      startedAt: args.startedAt,
+      detail: failed ? undefined : "Simulated",
+      durationMs: latencyMs,
     });
     const finishedAt = this.timeline.now;
     const row = await this.db.toolCall.create({
@@ -193,14 +197,14 @@ export class RunWriter {
         workerId: this.seat.workerId,
         toolName: call.name,
         attempt: this.attempt,
-        callId: args.callId ?? call.id,
+        callId: call.id,
         input: toJson(call.input),
         output: failed ? undefined : toJson(args.output),
         status: failed ? "FAILED" : "SUCCEEDED",
         error: args.error ?? null,
         latencyMs,
         costUsd: failed ? 0 : costUsd,
-        simulated: this.simulated,
+        simulated: true,
         createdAt: step.startedAt,
         finishedAt,
       },
@@ -214,8 +218,8 @@ export class RunWriter {
     return { step, toolCallId: row.id };
   }
 
-  /** Meter through the real ledger (atomic Run rollups), then move the row to the run's own timeline. */
-  private async usage(args: { kind: "MODEL" | "TOOL"; provider: string; resource: string; inputTokens?: number; outputTokens?: number; costUsd: number; at: Date }): Promise<void> {
+  /** Meter through the real ledger (atomic Run rollups), then move the row onto the run's own timeline. */
+  async usage(args: { kind: "MODEL" | "TOOL"; provider: string; resource: string; inputTokens?: number; outputTokens?: number; costUsd: number; at: Date }): Promise<void> {
     await recordUsage({
       organizationId: this.seat.organizationId,
       kind: args.kind,
@@ -224,11 +228,12 @@ export class RunWriter {
       inputTokens: args.inputTokens,
       outputTokens: args.outputTokens,
       costUsd: args.costUsd,
-      simulated: this.simulated,
+      simulated: true,
       workerId: this.seat.workerId,
       jobId: this.seat.jobId,
       runId: this.runId,
     });
+    // The row just written is the only one of this run stamped with the real clock (history is in the past).
     const newest = await this.db.usageRecord.findFirst({ where: { runId: this.runId }, orderBy: [{ occurredAt: "desc" }, { id: "desc" }], select: { id: true } });
     if (newest) await this.db.usageRecord.update({ where: { id: newest.id }, data: { occurredAt: args.at } });
   }
@@ -246,7 +251,7 @@ export class RunWriter {
   }
 
   /** Deliverable row + DELIVERABLE step + activity, mirroring runtime/deliverable.ts. */
-  async deliverable(args: { content: string; records: Array<Record<string, unknown>> | null }): Promise<{ id: string; title: string; step: StepHandle }> {
+  async deliverable(args: { content: string; records: Array<Record<string, unknown>> | null }): Promise<{ id: string; title: string }> {
     const { blueprint, spec } = this.seat;
     const { deliverable } = blueprint;
     const now = this.timeline.now;
@@ -271,7 +276,7 @@ export class RunWriter {
       },
       select: { id: true },
     });
-    const step = await this.step({
+    await this.step({
       kind: "DELIVERABLE",
       title: `Delivered “${title}”`,
       detail: count !== null ? `${count} record${count === 1 ? "" : "s"} · ${deliverable.format}` : deliverable.format,
@@ -287,16 +292,16 @@ export class RunWriter {
       metadata: { deliverableId: row.id },
       at: this.timeline.now,
     });
-    return { id: row.id, title, step };
+    return { id: row.id, title };
   }
 
-  async activity(args: { type: ActivityType; title: string; detail?: string; actorType: ActorType; actorName?: string; metadata?: Record<string, unknown>; at: Date; withRun?: boolean }): Promise<void> {
+  async activity(args: { type: ActivityType; title: string; detail?: string; actorType: ActorType; actorName?: string; metadata?: Record<string, unknown>; at: Date }): Promise<void> {
     await this.db.activityEvent.create({
       data: {
         organizationId: this.seat.organizationId,
         workerId: this.seat.workerId,
         jobId: this.seat.jobId,
-        runId: args.withRun === false ? null : this.runId,
+        runId: this.runId,
         type: args.type,
         actorType: args.actorType,
         actorName: args.actorName ?? null,
@@ -307,20 +312,4 @@ export class RunWriter {
       },
     });
   }
-}
-
-/** The checkpoint the executor leaves on a finished run: everything produced, no agent mid-flight. */
-export function terminalCheckpoint(args: { componentIndex: number; context: Record<string, unknown>; nextStepIndex: number; counters: { modelCalls: number; toolCalls: number; costUsd: number }; activeMs: number; deliverableId?: string }): RunCheckpoint {
-  return {
-    version: 1,
-    componentIndex: args.componentIndex,
-    context: args.context,
-    nextStepIndex: args.nextStepIndex,
-    counters: { ...args.counters, activeMs: args.activeMs },
-    ...(args.deliverableId ? { deliverableId: args.deliverableId } : {}),
-  };
-}
-
-export function assistantWithCalls(text: string, toolCalls: ToolCallRequest[]): ChatMessage {
-  return { role: "assistant", content: text, ...(toolCalls.length > 0 ? { toolCalls } : {}) };
 }

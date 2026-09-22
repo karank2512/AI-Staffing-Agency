@@ -14,8 +14,9 @@ import type { ToolName } from "@/server/tools/schemas";
  * exactly like a live Simulated-mode run (same prompts, same tool inputs, same report layout), while staying
  * fast and fully deterministic.
  *
- * Variety across runs comes from two knobs that a live run also has: the clock (fixture dates are relative to
- * it) and the order in which the simulated web/datasets surface results (rotated by `seed`).
+ * Variety across runs comes from two knobs: the clock (fixture dates are relative to it, as in a live run) and
+ * the order in which the simulated web/datasets surface results (rotated by `seed` — the one deliberate
+ * difference from the live simulated tools, which always return the same order).
  */
 
 export interface ToolExecution {
@@ -23,6 +24,8 @@ export interface ToolExecution {
   output: unknown;
   error?: string;
   costUsd: number;
+  /** The grant requires approval: the run paused on this call and a human decided it. */
+  gated?: boolean;
 }
 
 export interface EmulatedTurn {
@@ -68,19 +71,28 @@ export interface EmulateRunArgs {
   now: Date;
   /** Rotates simulated search results / dataset order so consecutive runs do not repeat each other. */
   seed: number;
-  /** "pause" leaves the approval-gated call unanswered (WAITING_FOR_APPROVAL); "approve" executes it. */
-  approvals?: "pause" | "approve";
-  /** Stop before this component (used to build partial traces for failed runs). */
-  stopBefore?: string;
   /**
-   * Applied to a json collector's final records before they enter the context. The brain is deterministic per
-   * blueprint, so this is how consecutive runs of the same worker end up with a slightly different set.
+   * What happens to an approval-gated call: "pause" leaves it unanswered (WAITING_FOR_APPROVAL), "approve"
+   * executes it, `{ reject }` answers it with the runtime's declined message so the agent adapts.
    */
-  shapeRecords?: (records: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
+  approvals?: ApprovalMode;
 }
 
+export type ApprovalMode = "pause" | "approve" | { reject: string };
+
 const CHARS_PER_TOKEN = 4;
+/** tools/impl/fetch-url caps page text; tools/impl/extract-data defaults maxRecords — mirrored so traces match. */
+const FETCH_MAX_TEXT_CHARS = 12_000;
+const EXTRACT_DEFAULT_MAX_RECORDS = 50;
 const estimateTokens = (chars: number) => Math.ceil(Math.max(0, chars) / CHARS_PER_TOKEN);
+
+/** Token usage exactly as the mock provider estimates it (~4 chars/token over system + messages JSON). */
+export function estimateTurnUsage(system: string, messages: ChatMessage[], text: string, toolCalls: ToolCallRequest[]): { inputTokens: number; outputTokens: number } {
+  return {
+    inputTokens: estimateTokens(system.length + JSON.stringify(messages).length),
+    outputTokens: estimateTokens(text.length + (toolCalls.length > 0 ? JSON.stringify(toolCalls).length : 0)),
+  };
+}
 
 function rotate<T>(items: readonly T[], seed: number): T[] {
   if (items.length < 2 || seed === 0) return [...items];
@@ -88,7 +100,7 @@ function rotate<T>(items: readonly T[], seed: number): T[] {
 }
 
 /** Simulated tool backends, exactly as tools/impl/* call them in Simulated mode, plus the per-run rotation. */
-function executeTool(name: ToolName, input: unknown, sim: Simulation, seed: number): { output: unknown; error?: string } {
+export function simulateTool(name: ToolName, input: unknown, sim: Simulation, seed: number): { output: unknown; error?: string } {
   const args = input as Record<string, unknown>;
   switch (name) {
     case "web_search": {
@@ -97,12 +109,15 @@ function executeTool(name: ToolName, input: unknown, sim: Simulation, seed: numb
       const results = rotate(sim.search(query, { maxResults: 10 }), seed ^ (query.length * 7919)).slice(0, maxResults);
       return { output: { results } };
     }
-    case "fetch_url":
-      return { output: sim.fetchPage(String(args.url)) };
+    case "fetch_url": {
+      const page = sim.fetchPage(String(args.url));
+      const text = page.text.length > FETCH_MAX_TEXT_CHARS ? `${page.text.slice(0, FETCH_MAX_TEXT_CHARS).trimEnd()}\n[truncated]` : page.text;
+      return { output: { url: page.url, title: page.title, text } };
+    }
     case "extract_data": {
       const fields = Array.isArray(args.fields) ? args.fields.map(String) : [];
-      const maxRecords = typeof args.maxRecords === "number" ? args.maxRecords : undefined;
-      return { output: { records: sim.extractRecords(String(args.text), fields, maxRecords ? { maxRecords } : undefined) } };
+      const maxRecords = typeof args.maxRecords === "number" ? args.maxRecords : EXTRACT_DEFAULT_MAX_RECORDS;
+      return { output: { records: sim.extractRecords(String(args.text), fields, { maxRecords }) } };
     }
     case "read_dataset": {
       const dataset = String(args.dataset);
@@ -119,7 +134,7 @@ function executeTool(name: ToolName, input: unknown, sim: Simulation, seed: numb
   }
 }
 
-function runAgent(component: AgentComponent, args: EmulateRunArgs, context: Record<string, unknown>, sim: Simulation): EmulatedAgent {
+export function emulateAgent(component: AgentComponent, args: EmulateRunArgs, context: Record<string, unknown>, sim: Simulation): EmulatedAgent {
   const { blueprint, spec } = args;
   const system = buildSystemPrompt(blueprint.persona, component);
   const toolSpecs = tools.specsFor(component.tools);
@@ -135,17 +150,10 @@ function runAgent(component: AgentComponent, args: EmulateRunArgs, context: Reco
     const toolCalls: ToolCallRequest[] = (produced.toolCalls ?? [])
       .filter((c) => offered.has(c.name))
       .map((c, i) => ({ id: `mock_${turn}_${i}`, name: c.name, input: c.input }));
-    let text = produced.text ?? "";
-    let output: unknown = text;
-    if (toolCalls.length === 0 && component.outputFormat === "json") {
-      const parsed = JSON.parse(text) as unknown;
-      output = args.shapeRecords && Array.isArray(parsed) ? args.shapeRecords(parsed as Array<Record<string, unknown>>) : parsed;
-      if (output !== parsed) text = JSON.stringify(output, null, 2);
-    }
-    const usage = {
-      inputTokens: estimateTokens(system.length + JSON.stringify(messages).length),
-      outputTokens: estimateTokens(text.length + (toolCalls.length > 0 ? JSON.stringify(toolCalls).length : 0)),
-    };
+    const text = produced.text ?? "";
+    // The simulated collector answers with bare JSON, which is exactly what parseJsonAnswer accepts first.
+    const output: unknown = toolCalls.length === 0 && component.outputFormat === "json" ? (JSON.parse(text) as unknown) : text;
+    const usage = estimateTurnUsage(system, messages, text, toolCalls);
     const entry: EmulatedTurn = { request, text, toolCalls, finishReason: toolCalls.length > 0 ? "tool_calls" : "stop", usage, executions: [] };
     turns.push(entry);
     messages.push({ role: "assistant", content: text, ...(toolCalls.length > 0 ? { toolCalls } : {}) });
@@ -155,12 +163,19 @@ function runAgent(component: AgentComponent, args: EmulateRunArgs, context: Reco
     for (const call of toolCalls) {
       const definition = tools.get(call.name);
       const gated = blueprint.tools.find((t) => t.toolName === call.name)?.requiresApproval ?? definition?.defaultRequiresApproval ?? false;
-      if (gated && (args.approvals ?? "approve") === "pause") {
+      const mode = args.approvals ?? "approve";
+      if (gated && mode === "pause") {
         return { component, system, turns, messages, pending: call };
       }
-      const result = executeTool(call.name as ToolName, call.input, sim, args.seed);
+      if (gated && typeof mode === "object") {
+        // A declined call never runs: the agent gets the runtime's declined message as an error result.
+        entry.executions.push({ call, output: { error: mode.reject }, error: mode.reject, costUsd: 0, gated });
+        messages.push({ role: "tool", toolCallId: call.id, toolName: call.name, output: { error: mode.reject }, isError: true });
+        continue;
+      }
+      const result = simulateTool(call.name as ToolName, call.input, sim, args.seed);
       const costUsd = definition?.costPerCallUsd ?? 0;
-      entry.executions.push({ call, output: result.output, error: result.error, costUsd });
+      entry.executions.push({ call, output: result.output, error: result.error, costUsd, gated });
       messages.push({ role: "tool", toolCallId: call.id, toolName: call.name, output: result.output, ...(result.error ? { isError: true } : {}) });
     }
   }
@@ -201,9 +216,8 @@ export function emulateRun(args: EmulateRunArgs): EmulatedRun {
 
   for (let index = 0; index < components.length; index++) {
     const component = components[index];
-    if (component.id === args.stopBefore) return { context, parts, componentIndex: index };
     if (component.type === "agent") {
-      const agent = runAgent(component, args, context, sim);
+      const agent = emulateAgent(component, args, context, sim);
       parts.push({ kind: "agent", component, agent });
       if (agent.pending) return { context, parts, componentIndex: index };
       context[component.outputKey] = agent.output;

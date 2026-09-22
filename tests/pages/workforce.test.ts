@@ -1,4 +1,4 @@
-import { subDays, subHours, subMinutes } from "date-fns";
+import { startOfDay, subDays, subHours, subMinutes } from "date-fns";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { recordActivity } from "@/server/activity";
 import { db, toJson } from "@/server/db";
@@ -101,9 +101,12 @@ describe("queries/workforce: getWorkforce", () => {
     await db.worker.update({ where: { id: alex.worker.id }, data: { health: "HEALTHY", score: 88 } });
 
     const now = new Date();
-    const succeeded = await createRun(t, alex, { status: "SUCCEEDED", finishedAt: subHours(now, 2), createdAt: subHours(now, 3) });
-    await createRun(t, alex, { status: "RUNNING", createdAt: subMinutes(now, 5) });
-    await createRun(t, sam, { status: "FAILED", finishedAt: subHours(now, 1), createdAt: subHours(now, 1), error: "Cost limit exceeded" });
+    // "Runs today" is a local-calendar-day count, so keep today's fixtures after midnight even when the suite runs at 1am.
+    const midnight = startOfDay(now).getTime();
+    const earlierToday = (d: Date) => new Date(Math.max(d.getTime(), midnight + 1000));
+    const succeeded = await createRun(t, alex, { status: "SUCCEEDED", finishedAt: earlierToday(subHours(now, 2)), createdAt: earlierToday(subHours(now, 3)) });
+    await createRun(t, alex, { status: "RUNNING", createdAt: earlierToday(subMinutes(now, 5)) });
+    await createRun(t, sam, { status: "FAILED", finishedAt: earlierToday(subHours(now, 1)), createdAt: earlierToday(subHours(now, 1)), error: "Cost limit exceeded" });
     // Old failure: outside the 7-day attention window, still counts nowhere on the dashboard.
     await createRun(t, sam, { status: "FAILED", finishedAt: subDays(now, 20), createdAt: subDays(now, 20) });
     await createDeliverable(t, alex, succeeded.id, { status: "PENDING_REVIEW", title: "Funding report — week 38" });
